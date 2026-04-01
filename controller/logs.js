@@ -15,7 +15,7 @@ export function initK8sClient(kubeConfig) {
   coreV1 = kubeConfig.makeApiClient(k8s.CoreV1Api);
 }
 
-//fetch recent logs
+//fetch all recent logs
 export async function fetchPodLogs(podName, namespace, options = {}) {
   const {
     container = null,
