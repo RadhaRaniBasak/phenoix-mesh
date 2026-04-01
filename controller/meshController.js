@@ -21,7 +21,7 @@ const log = pino({
 const RECOVERY_WINDOW_MS  = parseInt(process.env.RECOVERY_WINDOW_MS  || '60000'); 
 const ERROR_RATE_THRESHOLD = parseFloat(process.env.ERROR_RATE_THRESHOLD || '0.01'); 
 
-// Track active incidents
+//track active incidents
 const activeIncidents = new Map();
 
 
