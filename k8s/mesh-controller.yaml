@@ -1,0 +1,102 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-controller
+  namespace: mesh-system
+  labels:
+    app: mesh-controller
+  annotations:
+    description: "Autonomous self-healing mesh controller"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mesh-controller
+  template:
+    metadata:
+      labels:
+        app: mesh-controller
+    spec:
+      serviceAccountName: mesh-controller
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: mesh-controller
+          image: your-registry.io/mesh-controller:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          env:
+            - name: PORT
+              value: "8080"
+            - name: K8S_IN_CLUSTER
+              value: "true"
+            - name: NODE_ENV
+              value: "production"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: PROMETHEUS_URL
+              value: "http://prometheus.mesh-system.svc.cluster.local:9090"
+            - name: RECOVERY_WINDOW_MS
+              value: "60000"
+            - name: ERROR_RATE_THRESHOLD
+              value: "0.01"
+
+            # Secrets
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mesh-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: mesh-secrets
+                  key: SLACK_WEBHOOK_URL
+                  optional: true
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mesh-controller
+  namespace: mesh-system
+  labels:
+    app: mesh-controller
+spec:
+  selector:
+    app: mesh-controller
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
