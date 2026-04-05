@@ -5,7 +5,7 @@ import pino from 'pino';
 import pinoHttp from 'pino-http';
 import k8s from '@kubernetes/client-node';
 
-//internal modules
+//internal m.
 import { handleFailure, handleRecovery, getActiveIncidents } from './meshController.js';
 import { initK8sClients } from './rollback.js';
 import { initK8sClient as initLogClient } from './logs.js';
@@ -18,14 +18,14 @@ const log = pino({
 const app = express();
 const PORT = parseInt(process.env.PORT || '8080');
 
-// Midware
+// Middleware
 app.use(express.json({ limit: '1mb' }));
 app.use(pinoHttp({ 
   logger: log,
   genReqId: (req) => req.headers['x-request-id'] || Math.random().toString(36).substring(7)
 }));
 
-//K8s Infra.
+//K8s Infrastr.
 let k8sReady = false;
 
 function initPhoenixK8s() {
@@ -43,7 +43,7 @@ function initPhoenixK8s() {
       log.info('Using default local KubeConfig context');
     }
 
-    // Initialize downstream services
+    //downstream services initialisations 
     initK8sClients(kc);
     initLogClient(kc);
     
@@ -60,8 +60,7 @@ function initPhoenixK8s() {
 
 initPhoenixK8s();
 
-//Incident R
-
+//incident handling
 
 app.post('/api/failure', async (req, res) => {
   const report = req.body;
@@ -77,7 +76,6 @@ app.post('/api/failure', async (req, res) => {
     incidentId: `${report.namespace}/${report.service}`,
     ts: new Date().toISOString()
   });
-
 
   handleFailure(report).catch(err => {
     log.error({ err: err.message, service: report.service }, 'Phoenix Mesh: Critical failure in incident handler');
@@ -97,7 +95,7 @@ app.post('/api/recovery', (req, res) => {
   res.json({ status: 'recovered', service: report.service });
 });
 
-//observability R
+//Observability r.
 
 app.get('/api/incidents', (req, res) => {
   res.json({ 
@@ -117,7 +115,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-//devlp & test tools
+//dvlpmnt  & test tools
 
 if (process.env.NODE_ENV !== 'production') {
   app.post('/api/test/failure', async (req, res) => {
@@ -159,7 +157,7 @@ function gracefulShutdown(signal) {
     process.exit(0);
   });
 
-//force exit
+
   setTimeout(() => {
     log.fatal('Phoenix Mesh Controller: Shutdown timed out, forcing exit');
     process.exit(1);
