@@ -26,12 +26,12 @@ export async function fetchIncidentLogs(podName, namespace, service, tailLines =
       namespace,
       undefined,
       undefined,
-      true, // follow
+      true, 
       undefined,
-      tailLines, // tailLines
+      tailLines, 
       undefined,
       undefined,
-      5000 // timeout
+      5000 
     );
 
     const logs = logsResponse.split('\n').filter(line => line.trim());
