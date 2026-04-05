@@ -1,179 +1,91 @@
 'use strict';
 
-import k8s from '@kubernetes/client-node';
+import axios from 'axios';
 import pino from 'pino';
 
 const log = pino({ 
   level: process.env.LOG_LEVEL || 'info',
-  name: 'phoenix-rollback-engine'
+  name: 'slack-notifier'
 });
 
-let appsV1;
-let coreV1;
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 
-
-export function initK8sClients(kubeConfig) {
-  appsV1 = kubeConfig.makeApiClient(k8s.AppsV1Api);
-  coreV1 = kubeConfig.makeApiClient(k8s.CoreV1Api);
-}
-
-const PATCH_HEADER = { headers: { 'Content-Type': 'application/strategic-merge-patch+json' } };
-
-//traffic isolation
-
-export async function rerouteTraffic(service, namespace, unhealthyPodName) {
-  log.info({ service, unhealthyPodName }, 'Phoenix Mesh: Attempting traffic isolation');
+export async function postPhoenixIncident(service, rcaReport, remediationSummary) {
+  if (!SLACK_WEBHOOK_URL) {
+    log.info('Slack webhook not configured, skipping notification');
+    return;
+  }
 
   try {
-    const podList = await coreV1.listNamespacedPod(
-      namespace, undefined, undefined, undefined, undefined, `app=${service}`
-    );
-    const allPods = podList.body.items;
+    const severity = rcaReport.severity || 'unknown';
+    const severityEmoji = {
+      critical: ':fire:',
+      high: ':warning:',
+      medium: ':yellow_circle:',
+      low: ':green_circle:',
+    }[severity] || ':grey_question:';
 
-    const healthyPods = allPods.filter(p =>
-      p.metadata.name !== unhealthyPodName &&
-      p.status.phase === 'Running' &&
-      p.status.conditions?.some(c => c.type === 'Ready' && c.status === 'True')
-    );
+    const payload = {
+      attachments: [
+        {
+          color: getSeverityColor(severity),
+          title: `${severityEmoji} Phoenix Mesh Incident - ${service}`,
+          text: rcaReport.rootCause || 'Service failure detected',
+          fields: [
+            {
+              title: 'Service',
+              value: service,
+              short: true,
+            },
+            {
+              title: 'Severity',
+              value: severity.toUpperCase(),
+              short: true,
+            },
+            {
+              title: 'Root Cause',
+              value: rcaReport.rootCause || 'Analysis pending',
+              short: false,
+            },
+            {
+              title: 'Impact Analysis',
+              value: rcaReport.impactAnalysis || 'Service availability affected',
+              short: false,
+            },
+            {
+              title: 'Remediation Status',
+              value: remediationSummary || 'Remediation in progress',
+              short: false,
+            },
+            {
+              title: 'Recommendations',
+              value: rcaReport.recommendations?.slice(0, 3).join('\n') || 'See logs for details',
+              short: false,
+            },
+            {
+              title: 'AI Model Used',
+              value: rcaReport.model || 'Unknown',
+              short: true,
+            },
+          ],
+          ts: Math.floor(Date.now() / 1000),
+        },
+      ],
+    };
 
-    if (healthyPods.length === 0) {
-      log.warn({ service }, 'Phoenix Mesh: No healthy pods available — aborting isolation to prevent total outage');
-      return { rerouted: false, reason: 'no_healthy_pods', healthyCount: 0 };
-    }
-
-    await coreV1.patchNamespacedPod(
-      unhealthyPodName, namespace,
-      { metadata: { labels: { 'phoenix.io/status': 'degraded' } } },
-      undefined, undefined, undefined, undefined, PATCH_HEADER
-    );
-    await coreV1.patchNamespacedService(
-      service, namespace,
-      { spec: { selector: { app: service, 'phoenix.io/status': 'healthy' } } },
-      undefined, undefined, undefined, undefined, PATCH_HEADER
-    );
-
-    log.info({ service, healthyCount: healthyPods.length }, 'Phoenix Mesh: Traffic isolated successfully');
-    return { rerouted: true, healthyPods: healthyPods.length };
+    await axios.post(SLACK_WEBHOOK_URL, payload, { timeout: 10000 });
+    log.info({ service, severity }, 'Slack notification sent');
   } catch (err) {
-    log.error({ err: err.message }, 'Phoenix Mesh: Isolation logic failed');
-    throw err;
+    log.error({ err: err.message }, 'Failed to send Slack notification');
   }
 }
 
-
-export async function restoreTrafficRouting(service, namespace) {
-  try {
-    await coreV1.patchNamespacedService(
-      service, namespace,
-      { spec: { selector: { app: service } } },
-      undefined, undefined, undefined, undefined, PATCH_HEADER
-    );
-    log.info({ service }, 'Phoenix Mesh: Normal routing restored');
-  } catch (err) {
-    log.error({ err: err.message }, 'Phoenix Mesh: Restoration of routing failed');
-    throw err;
-  }
-}
-
-//automated rollback
-
-export async function rollbackDeployment(name, namespace, targetRevision = null) {
-  log.info({ name, namespace }, 'Phoenix Mesh: Initiating automated rollback');
-
-  const rsList = await appsV1.listNamespacedReplicaSet(
-    namespace, undefined, undefined, undefined, undefined, `app=${name}`
-  );
-
-  const ownedRS = rsList.body.items
-    .filter(rs => rs.metadata.ownerReferences?.some(
-      ref => ref.kind === 'Deployment' && ref.name === name
-    ))
-    .sort((a, b) => {
-      const revA = parseInt(a.metadata.annotations?.['deployment.kubernetes.io/revision'] || '0');
-      const revB = parseInt(b.metadata.annotations?.['deployment.kubernetes.io/revision'] || '0');
-      return revB - revA; // Descending order
-    });
-
-  if (ownedRS.length < 2) {
-    throw new Error(`Phoenix Mesh: Insufficient history for rollback (found ${ownedRS.length} revisions)`);
-  }
-
-  // Choose target: specific revision or the immediate previous one (index 1)
-  const targetRS = targetRevision
-    ? ownedRS.find(rs =>
-        rs.metadata.annotations?.['deployment.kubernetes.io/revision'] === String(targetRevision)
-      )
-    : ownedRS[1];
-
-  if (!targetRS) {
-    throw new Error(`Phoenix Mesh: Target revision ${targetRevision} not found in cluster history`);
-  }
-
-  const targetImage = targetRS.spec.template.spec.containers[0]?.image;
-  const targetRev = targetRS.metadata.annotations?.['deployment.kubernetes.io/revision'];
-
-  // Applying  the rollback
-  const patch = {
-    metadata: {
-      annotations: {
-        'phoenix.io/auto-rollback': 'true',
-        'deployment.kubernetes.io/change-cause': `Phoenix Mesh: Automated recovery at ${new Date().toISOString()}`,
-      },
-    },
-    spec: {
-      template: {
-        metadata: targetRS.spec.template.metadata,
-        spec: targetRS.spec.template.spec,
-      },
-    },
+function getSeverityColor(severity) {
+  const colors = {
+    critical: '#FF0000',
+    high: '#FFA500',    
+    medium: '#FFFF00',   
+    low: '#00FF00',      
   };
-
-  await appsV1.patchNamespacedDeployment(
-    name, namespace, patch,
-    undefined, undefined, undefined, undefined, PATCH_HEADER
-  );
-
-  log.info({ name, targetRev, targetImage }, 'Phoenix Mesh: Rollback patch applied to deployment');
-  return { rolledBackTo: targetRev, image: targetImage };
+  return colors[severity] || '#808080'; 
 }
-
-//verification
-
-export async function watchRolloutStatus(name, namespace, timeoutMs = 120000) {
-  const deadline = Date.now() + timeoutMs;
-  log.info({ name }, 'Phoenix Mesh: Verifying rollout health...');
-
-  while (Date.now() < deadline) {
-    const deploy = await appsV1.readNamespacedDeployment(name, namespace);
-    const { spec, status } = deploy.body;
-    const desired = spec.replicas || 1;
-
-    if (
-      status.updatedReplicas   === desired &&
-      status.readyReplicas     === desired &&
-      status.availableReplicas === desired
-    ) {
-      log.info({ name, replicas: desired }, 'Phoenix Mesh: Rollout verification successful');
-      return { success: true, replicas: desired };
-    }
-
-    await sleep(5000);
-  }
-
-  log.error({ name }, 'Phoenix Mesh: Rollout verification timed out');
-  return { success: false, reason: 'timeout' };
-}
-
-export async function getDeploymentInfo(name, namespace) {
-  const deploy = await appsV1.readNamespacedDeployment(name, namespace);
-  const { metadata, spec, status } = deploy.body;
-  return {
-    name: metadata.name,
-    namespace: metadata.namespace,
-    currentRevision: metadata.annotations?.['deployment.kubernetes.io/revision'],
-    currentImage: spec.template.spec.containers[0]?.image,
-    readyReplicas: status.readyReplicas,
-  };
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
