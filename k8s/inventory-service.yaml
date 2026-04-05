@@ -1,63 +1,122 @@
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inventory-service-config
+  namespace: phoenix-mesh
+data:
+  SERVICE_NAME: "inventory-service"
+  SERVICE_PORT: "3000"
+  LOG_LEVEL: "info"
+  NODE_ENV: "production"
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: phoenix-inventory-service
-  namespace: mesh-system
+  name: inventory-service
+  namespace: phoenix-mesh
   labels:
-    app: inventory-service
-    app.kubernetes.io/part-of: phoenix-mesh
+    app: phoenix-mesh
+    service: inventory-service
+    component: service
 spec:
-  replicas: 3
-  revisionHistoryLimit: 20
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
   selector:
     matchLabels:
-      app: inventory-service
-      mesh.health: healthy
+      app: phoenix-mesh
+      service: inventory-service
+      component: service
   template:
     metadata:
       labels:
-        app: inventory-service
-        mesh.health: healthy
+        app: phoenix-mesh
+        service: inventory-service
+        component: service
+      annotations:
+        description: "Inventory Service - Phoenix Mesh managed service"
+        prometheus.io/scrape: "false"
     spec:
-      serviceAccountName: phoenix-mesh-controller
-      terminationGracePeriodSeconds: 30
-      
+      serviceAccountName: phoenix-services
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: service
+                      operator: In
+                      values:
+                        - inventory-service
+                topologyKey: kubernetes.io/hostname
       containers:
-      
         - name: inventory-service
-          image: your-registry.io/phoenix-inventory-service:latest
+          image: localhost:5000/phoenix-inventory-service:latest
           imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 3000
-          env:
-            - name: SERVICE_NAME
-              value: "inventory-service"
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: inventory-service-config
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
           livenessProbe:
             httpGet:
               path: /health
               port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 20
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /health
               port: 3000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
 
-        - name: sidecar-agent
-          image: your-registry.io/phoenix-sidecar:latest
+        - name: sidecar
+          image: localhost:5000/phoenix-sidecar:latest
           imagePullPolicy: Always
           ports:
             - name: metrics
               containerPort: 9090
+              protocol: TCP
           env:
+            - name: SERVICE_NAME
+              value: "inventory-service"
             - name: SERVICE_URL
               value: "http://localhost:3000"
             - name: CONTROLLER_URL
-              value: "http://phoenix-mesh-controller.mesh-system.svc.cluster.local:8080"
+              value: "http://phoenix-controller:8080"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -66,22 +125,151 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: PROBE_INTERVAL_MS
+              value: "5000"
+            - name: FAIL_THRESHOLD
+              value: "3"
+            - name: PROBE_TIMEOUT_MS
+              value: "2000"
+            - name: LOG_LEVEL
+              value: "info"
           resources:
             requests:
-              cpu: "50m"
               memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "250m"
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 9090
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: inventory-service
-  namespace: mesh-system
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    service: inventory-service
+    component: service
 spec:
+  type: ClusterIP
   selector:
-    app: inventory-service
-    mesh.health: healthy
+    app: phoenix-mesh
+    service: inventory-service
+    component: service
   ports:
     - name: http
-      port: 80
+      port: 3000
       targetPort: 3000
+      protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-sidecar-metrics
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    service: inventory-service
+    component: sidecar
+spec:
+  type: ClusterIP
+  selector:
+    app: phoenix-mesh
+    service: inventory-service
+    component: service
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inventory-service
+  namespace: phoenix-mesh
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inventory-service
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+      selectPolicy: Max
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inventory-service
+  namespace: phoenix-mesh
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: phoenix-mesh
+      service: inventory-service
+      component: service
