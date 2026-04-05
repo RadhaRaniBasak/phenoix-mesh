@@ -23,29 +23,31 @@ jobs:
         run: docker compose up -d
       
       - name: Wait for services to be healthy
-        run: |
-          for i in {1..30}; do
-            if docker compose ps | grep -q "healthy"; then
-              echo "Services are healthy"
-              exit 0
-            fi
-            echo "Waiting for services... ($i/30)"
-            sleep 2
-          done
-          echo "Services failed to become healthy"
-          docker compose logs
-          exit 1
-      
-      - name: Run health checks
-        run: |
-          echo "Checking phoenix-controller health..."
-          curl -f http://localhost:8080/health || exit 1
-          
-          echo "Checking order-sidecar health..."
-          curl -f http://localhost:9101/status || exit 1
-          
-          echo "Checking payment-sidecar health..."
-          curl -f http://localhost:9102/status || exit 1
+  run: |
+    for i in {1..60}; do
+      if docker compose ps | grep -qE "healthy.*healthy.*healthy"; then
+        echo "Services are healthy"
+        exit 0
+      fi
+      echo "Waiting for services... ($i/60)"
+      sleep 2
+    done
+    echo "Services failed to become healthy"
+    docker compose logs
+    exit 1
+
+- name: Run health checks
+  run: |
+    echo "Checking phoenix-controller health..."
+    curl -f http://localhost:8080/health || exit 1
+    
+    echo "Checking order-sidecar health..."
+    curl -f http://localhost:9101/status || exit 1
+    
+    echo "Checking payment-sidecar health..."
+    curl -f http://localhost:9102/status || exit 1
+    
+    echo "All health checks passed!"
       
       - name: Cleanup
         if: always()
