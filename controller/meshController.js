@@ -10,7 +10,7 @@ import {
   watchRolloutStatus, 
   getDeploymentInfo 
 } from './rollback.js';
-import { generatePhoenixRCA } from './rcaEngine.js'; // Updated to Phoenix Engine
+import { generatePhoenixRCA } from './rcaEngine.js';
 import { postPhoenixIncident } from './slack.js';
 
 const log = pino({ 
@@ -21,9 +21,7 @@ const log = pino({
 const RECOVERY_WINDOW_MS  = parseInt(process.env.RECOVERY_WINDOW_MS  || '60000'); 
 const ERROR_RATE_THRESHOLD = parseFloat(process.env.ERROR_RATE_THRESHOLD || '0.01'); 
 
-//track active incidents
 const activeIncidents = new Map();
-
 
 export async function handleFailure(report) {
   const { service, namespace, podName } = report;
@@ -92,7 +90,6 @@ export async function handleFailure(report) {
         incident.remediationSteps.push({ step: 'rollback', error: err.message, ts: Date.now() });
       }
     } else {
-      // Recovery detected — restore routing for the service
       try {
         await restoreTrafficRouting(service, namespace);
         incident.remediationSteps.push({ step: 'restore_routing', ts: Date.now() });
@@ -148,13 +145,13 @@ export async function handleFailure(report) {
     activeIncidents.delete(incidentKey);
   }
 }
+
 export function handleRecovery(report) {
   const { service, namespace } = report;
   const incidentKey = `${namespace}/${service}`;
   log.info({ incidentKey }, 'Phoenix Mesh: Service recovery signal acknowledged');
 }
 
-//monitoring loop
 async function monitorRecovery(service) {
   const deadline = Date.now() + RECOVERY_WINDOW_MS;
 
