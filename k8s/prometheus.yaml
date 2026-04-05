@@ -2,95 +2,255 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: phoenix-prometheus-config
-  namespace: mesh-system
+  name: prometheus-config
+  namespace: phoenix-mesh
 data:
   prometheus.yml: |
     global:
-      scrape_interval: 10s
-      evaluation_interval: 10s
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'phoenix-mesh-k8s'
+        environment: 'production'
 
-    scrape_configs:
-      # Automatically discover and scrape Phoenix Sidecars
-      - job_name: 'phoenix-mesh-sidecars'
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: []
+
+    rule_files: []
+
+      # Prometheus itself
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+      - job_name: 'phoenix-controller'
         kubernetes_sd_configs:
           - role: pod
+            namespaces:
+              names:
+                - phoenix-mesh
         relabel_configs:
-          # Only target pods that have a container named 'sidecar-agent'
-          - source_labels: [__meta_kubernetes_pod_container_name]
+          - source_labels: [__meta_kubernetes_pod_label_component]
             action: keep
-            regex: sidecar-agent
-          # Map the Pod IP to the sidecar's metrics port (9090)
-          - source_labels: [__meta_kubernetes_pod_ip]
-            target_label: __address__
-            replacement: '$1:9090'
-          # Extract clean labels for our RCA Engine queries
+            regex: controller
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
-          - source_labels: [__meta_kubernetes_pod_label_app]
-            target_label: service
           - source_labels: [__meta_kubernetes_namespace]
             target_label: namespace
+        scrape_interval: 10s
 
-      # Monitor the Brain (Mesh Controller)
-      - job_name: 'phoenix-controller'
-        static_configs:
-          - targets: ['phoenix-mesh-controller.mesh-system.svc.cluster.local:8080']
+      - job_name: 'order-service'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - phoenix-mesh
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_service]
+            action: keep
+            regex: order-service
+          - source_labels: [__meta_kubernetes_pod_label_component]
+            action: keep
+            regex: sidecar
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        scrape_interval: 10s
+
+  
+      - job_name: 'payment-service'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - phoenix-mesh
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_service]
+            action: keep
+            regex: payment-service
+          - source_labels: [__meta_kubernetes_pod_label_component]
+            action: keep
+            regex: sidecar
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        scrape_interval: 10s
+
+
+      - job_name: 'inventory-service'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - phoenix-mesh
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_service]
+            action: keep
+            regex: inventory-service
+          - source_labels: [__meta_kubernetes_pod_label_component]
+            action: keep
+            regex: sidecar
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        scrape_interval: 10s
+
+
+      - job_name: 'ollama'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - phoenix-mesh
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_component]
+            action: keep
+            regex: ollama
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        scrape_interval: 30s
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-storage
+  namespace: phoenix-mesh
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: phoenix-prometheus
-  namespace: mesh-system
+  name: prometheus
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    component: prometheus
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: phoenix-prometheus
+      app: phoenix-mesh
+      component: prometheus
   template:
     metadata:
       labels:
-        app: phoenix-prometheus
+        app: phoenix-mesh
+        component: prometheus
+      annotations:
+        description: "Prometheus metrics collection for Phoenix Mesh"
     spec:
-      serviceAccountName: phoenix-mesh-controller # Reuse for SD permissions
+      serviceAccountName: phoenix-services
+      securityContext:
+        fsGroup: 65534
       containers:
         - name: prometheus
           image: prom/prometheus:v2.48.0
+          imagePullPolicy: IfNotPresent
           args:
-            - "--config.file=/etc/prometheus/prometheus.yml"
-            - "--storage.tsdb.path=/prometheus"
-            - "--storage.tsdb.retention.time=7d"
-            - "--web.enable-lifecycle"
+            - '--config.file=/etc/prometheus/prometheus.yml'
+            - '--storage.tsdb.path=/prometheus'
+            - '--web.enable-lifecycle'
+            - '--storage.tsdb.retention.time=15d'
           ports:
-            - containerPort: 9090
+            - name: web
+              containerPort: 9090
+              protocol: TCP
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              memory: "512Mi"
+              cpu: "250m"
             limits:
-              cpu: "500m"
-              memory: "1Gi"
+              memory: "2Gi"
+              cpu: "1000m"
           volumeMounts:
-            - name: config
+            - name: prometheus-config
               mountPath: /etc/prometheus
-            - name: storage
+            - name: prometheus-data
               mountPath: /prometheus
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
       volumes:
-        - name: config
+        - name: prometheus-config
           configMap:
-            name: phoenix-prometheus-config
-        - name: storage
-          emptyDir: {} # For production, swap to a PersistentVolumeClaim
+            name: prometheus-config
+        - name: prometheus-data
+          persistentVolumeClaim:
+            claimName: prometheus-storage
+      restartPolicy: Always
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: phoenix-prometheus
-  namespace: mesh-system
+  name: prometheus
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    component: prometheus
 spec:
+  type: ClusterIP
   selector:
-    app: phoenix-prometheus
+    app: phoenix-mesh
+    component: prometheus
   ports:
-    - port: 9090
+    - name: web
+      port: 9090
       targetPort: 9090
+      protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-external
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    component: prometheus
+spec:
+  type: LoadBalancer
+  selector:
+    app: phoenix-mesh
+    component: prometheus
+  ports:
+    - name: web
+      port: 9091
+      targetPort: 9090
+      protocol: TCP
