@@ -5,92 +5,65 @@ import pino from 'pino';
 
 const log = pino({ 
   level: process.env.LOG_LEVEL || 'info',
-  name: 'phoenix-metrics-client'
+  name: 'metrics-collector'
 });
 
-const PROMETHEUS_URL = process.env.PROMETHEUS_URL || 'http://phoenix-prometheus:9090';
+const PROMETHEUS_URL = process.env.PROMETHEUS_URL || 'http://localhost:9090';
 
-
-export async function queryPrometheus(promql) {
+export async function collectServiceMetrics(service) {
   try {
-    const res = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
-      params: { query: promql },
-      timeout: 5000,
-    });
+    const errorRateQuery = `rate(service_errors_total{service="${service}"}[5m])`;
+    const errorRateResponse = await queryPrometheus(errorRateQuery);
+    const errorRate = parseMetricValue(errorRateResponse) || 0;
+    const latencyQuery = `histogram_quantile(0.95, rate(service_probe_latency_ms_bucket{service="${service}"}[5m]))`;
+    const latencyResponse = await queryPrometheus(latencyQuery);
+    const latency = parseMetricValue(latencyResponse) || 0;
+    const cpuQuery = `rate(container_cpu_usage_seconds_total{pod_name=~"${service}.*"}[5m]) * 100`;
+    const cpuResponse = await queryPrometheus(cpuQuery);
+    const cpu = parseMetricValue(cpuResponse) || 0;
+    const memoryQuery = `container_memory_usage_bytes{pod_name=~"${service}.*"} / container_spec_memory_limit_bytes{pod_name=~"${service}.*"} * 100`;
+    const memoryResponse = await queryPrometheus(memoryQuery);
+    const memory = parseMetricValue(memoryResponse) || 0;
 
-    const data = res.data?.data;
-    if (!data || data.resultType !== 'vector' || data.result.length === 0) {
-      return null;
-    }
+    const metrics = {
+      service,
+      errorRate: Math.min(errorRate, 1), // Clamp between 0-1
+      latency: Math.round(latency),
+      cpu: Math.round(cpu),
+      memory: Math.round(memory),
+      timestamp: new Date().toISOString(),
+    };
 
-    // Return first result's value (index 1 in [timestamp, value])
-    const raw = data.result[0].value[1];
-    return parseFloat(raw);
+    log.info({ service, ...metrics }, 'Metrics collected');
+    return metrics;
   } catch (err) {
-    log.warn({ promql, err: err.message }, 'Phoenix Mesh: Prometheus instant query failed');
+    log.error({ err: err.message, service }, 'Failed to collect metrics');
     return null;
   }
 }
 
-export async function queryRange(promql, start, end, step = '15s') {
+async function queryPrometheus(query) {
   try {
-    const res = await axios.get(`${PROMETHEUS_URL}/api/v1/query_range`, {
-      params: {
-        query: promql,
-        start: Math.floor(start / 1000),
-        end: Math.floor(end / 1000),
-        step,
-      },
+    const response = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
+      params: { query },
       timeout: 5000,
     });
 
-    const result = res.data?.data?.result?.[0]?.values || [];
-    return result.map(([ts, val]) => ({
-      timestamp: ts * 1000,
-      value: parseFloat(val),
-    }));
+    return response.data.data;
   } catch (err) {
-    log.warn({ promql, err: err.message }, 'Phoenix Mesh: Prometheus range query failed');
-    return [];
+    log.warn({ err: err.message, query }, 'Prometheus query failed');
+    return null;
   }
 }
-//update new query 
-export async function collectServiceMetrics(service, windowMinutes = 5) {
-  const window = `${windowMinutes}m`;
+function parseMetricValue(data) {
+  if (!data) return null;
 
-  
-  const [errorRate, p99Latency, p50Latency, probeSuccessRate, errorsByType] = await Promise.all([
-    queryPrometheus(`rate(phoenix_service_errors_total{service="${service}"}[${window}])`),
-    queryPrometheus(`histogram_quantile(0.99, rate(phoenix_service_probe_latency_ms_bucket{service="${service}"}[${window}]))`),
-    queryPrometheus(`histogram_quantile(0.50, rate(phoenix_service_probe_latency_ms_bucket{service="${service}"}[${window}]))`),
-    queryPrometheus(`rate(phoenix_service_probes_total{service="${service}",result="success"}[${window}]) / rate(phoenix_service_probes_total{service="${service}"}[${window}])`),
-    queryPrometheusVector(`sum by (type) (rate(phoenix_service_errors_total{service="${service}"}[${window}]))`),
-  ]);
-
-  return {
-    errorRate:         errorRate   !== null ? parseFloat(errorRate.toFixed(6))  : null,
-    p99LatencyMs:      p99Latency  !== null ? Math.round(p99Latency)            : null,
-    p50LatencyMs:      p50Latency  !== null ? Math.round(p50Latency)            : null,
-    probeSuccessRate:  probeSuccessRate !== null ? parseFloat((probeSuccessRate * 100).toFixed(2)) : null,
-    errorsByType,
-    collectedAt: new Date().toISOString(),
-  };
-}
-
-async function queryPrometheusVector(promql) {
-  try {
-    const res = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
-      params: { query: promql },
-      timeout: 5000,
-    });
-
-    const results = res.data?.data?.result || [];
-    return results.map(r => ({
-      labels: r.metric,
-      value: parseFloat(r.value[1]),
-    }));
-  } catch (err) {
-    log.warn({ promql, err: err.message }, 'Phoenix Mesh: Prometheus vector query failed');
-    return [];
+  if (data.resultType === 'vector' && data.result?.length > 0) {
+    const value = data.result[0].value?.[1];
+    return value ? parseFloat(value) : null;
   }
+  if (data.resultType === 'scalar' && data.result?.length === 2) {
+    return parseFloat(data.result[1]);
+  }
+  return null;
 }
