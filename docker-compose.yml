@@ -4,7 +4,11 @@ networks:
   phoenix-mesh-net:
     driver: bridge
 
-# ── Shared Phoenix Sidecar Environment ────────────────────────────────────────
+volumes:
+  prometheus_data:
+  ollama_data:
+
+#shared enviroment 
 x-sidecar-env: &sidecar-env
   CONTROLLER_URL: http://phoenix-controller:8080
   PROBE_INTERVAL_MS: ${PROBE_INTERVAL_MS:-5000}
@@ -12,9 +16,23 @@ x-sidecar-env: &sidecar-env
   PROBE_TIMEOUT_MS: ${PROBE_TIMEOUT_MS:-2000}
   LOG_LEVEL: ${LOG_LEVEL:-info}
 
+x-service-env: &service-env
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  NODE_ENV: ${NODE_ENV:-development}
+
+x-controller-env: &controller-env
+  PORT: "8080"
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  NODE_ENV: ${NODE_ENV:-development}
+  PROMETHEUS_URL: http://prometheus:9090
+  K8S_IN_CLUSTER: ${K8S_IN_CLUSTER:-false}
+
+x-ollama-env: &ollama-env
+  OLLAMA_HOST: 0.0.0.0:11434
+
 services:
 
-  # ── Observability Stack ─────────────────────────────────────────────────────
+  #obeservability stack
   prometheus:
     image: prom/prometheus:v2.48.0
     container_name: phoenix-prometheus
@@ -22,6 +40,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --web.enable-lifecycle
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
     ports:
       - "9091:9090"
     volumes:
@@ -31,10 +50,32 @@ services:
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
       interval: 10s
+      timeout: 5s
       retries: 3
+      start_period: 15s
+    restart: unless-stopped
+#llm stack
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: phoenix-ollama
+    environment:
+      <<: *ollama-env
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
-  # ── Phoenix Mesh Control Plane ──────────────────────────────────────────────
+  #controls
+
   phoenix-controller:
     build:
       context: ./controller
@@ -43,38 +84,56 @@ services:
     ports:
       - "8080:8080"
     environment:
-      PORT: "8080"
-      # AI Analysis Key (Set in your .env file)
-      AI_ANALYSIS_API_KEY: ${AI_ANALYSIS_API_KEY:?AI_ANALYSIS_API_KEY is required}
+      <<: *controller-env
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
-      PROMETHEUS_URL: http://phoenix-prometheus:9090
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      NODE_ENV: development
+      RCA_PROVIDER: ${RCA_PROVIDER:-ollama}
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral}
+      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-60000}
+      RECOVERY_WINDOW_MS: ${RECOVERY_WINDOW_MS:-60000}
+      ERROR_RATE_THRESHOLD: ${ERROR_RATE_THRESHOLD:-0.01}
+      RCA_CACHE_TTL_MS: ${RCA_CACHE_TTL_MS:-600000}
     depends_on:
       prometheus:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     networks: [phoenix-mesh-net]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 15s
-      start_period: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     restart: unless-stopped
 
-  # ── Phoenix Service: Order ──────────────────────────────────────────────────
+  #buisness S.
+
+  # ORDER SERVICE
   order-service:
     build:
-      context: ./services/order-service
+      context: ./service/order-service
+      dockerfile: Dockerfile
     container_name: phoenix-order-svc
     expose:
       - "3000"
     environment:
+      <<: *service-env
       SERVICE_NAME: order-service
+      SERVICE_PORT: "3000"
     networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 2
     restart: unless-stopped
 
   order-sidecar:
     build:
       context: ./sidecar
+      dockerfile: Dockerfile
     container_name: phoenix-order-sidecar
     ports:
       - "9101:9090"
@@ -83,26 +142,47 @@ services:
       SERVICE_NAME: order-service
       SERVICE_URL: http://order-service:3000
       POD_NAME: order-pod-local
+      POD_NAMESPACE: default
+      SIDECAR_PORT: "9090"
     depends_on:
       order-service:
-        condition: service_started
+        condition: service_healthy
       phoenix-controller:
         condition: service_healthy
     networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/status"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 2
+    restart: unless-stopped
 
-  # ── Phoenix Service: Payment ────────────────────────────────────────────────
+  # payment S.
   payment-service:
     build:
-      context: ./services/payment-service
+      context: ./service/payment-service
+      dockerfile: Dockerfile
     container_name: phoenix-payment-svc
     expose:
       - "3000"
+    environment:
+      <<: *service-env
+      SERVICE_NAME: payment-service
+      SERVICE_PORT: "3000"
     networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 2
     restart: unless-stopped
 
   payment-sidecar:
     build:
       context: ./sidecar
+      dockerfile: Dockerfile
     container_name: phoenix-payment-sidecar
     ports:
       - "9102:9090"
@@ -111,20 +191,28 @@ services:
       SERVICE_NAME: payment-service
       SERVICE_URL: http://payment-service:3000
       POD_NAME: payment-pod-local
+      POD_NAMESPACE: default
+      SIDECAR_PORT: "9090"
     depends_on:
       payment-service:
-        condition: service_started
+        condition: service_healthy
       phoenix-controller:
         condition: service_healthy
     networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/status"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 2
+    restart: unless-stopped
 
-volumes:
-  prometheus_data:
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PHOENIX MESH PORT MAP:
-#   9091 -> Prometheus Dashboard
-#   8080 -> Phoenix Controller API
-#   9101 -> Order Sidecar (Metrics & Proxy)
-#   9102 -> Payment Sidecar (Metrics & Proxy)
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# PORT MAPPING REFERENCE
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9091   → Prometheus Dashboard
+# 8080   → Phoenix Controller API  
+# 11434  → Ollama LLM API
+# 9101   → Order Sidecar (Metrics & Proxy)
+# 9102   → Payment Sidecar (Metrics & Proxy)
+# ═══════════════════════════════════════════════════════════════════════════════
