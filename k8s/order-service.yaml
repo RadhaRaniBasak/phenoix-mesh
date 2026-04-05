@@ -1,59 +1,122 @@
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-service-config
+  namespace: phoenix-mesh
+data:
+  SERVICE_NAME: "order-service"
+  SERVICE_PORT: "3000"
+  LOG_LEVEL: "info"
+  NODE_ENV: "production"
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: phoenix-order-service
-  namespace: mesh-system
+  name: order-service
+  namespace: phoenix-mesh
   labels:
-    app: order-service
-    app.kubernetes.io/part-of: phoenix-mesh
+    app: phoenix-mesh
+    service: order-service
+    component: service
 spec:
   replicas: 3
-  revisionHistoryLimit: 20
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
   selector:
     matchLabels:
-      app: order-service
-      mesh.health: healthy
+      app: phoenix-mesh
+      service: order-service
+      component: service
   template:
     metadata:
       labels:
-        app: order-service
-        mesh.health: healthy
+        app: phoenix-mesh
+        service: order-service
+        component: service
+      annotations:
+        description: "Order Service - Phoenix Mesh managed service"
+        prometheus.io/scrape: "false"
     spec:
-      # Ensures the controller can properly identify this ServiceAccount
-      serviceAccountName: phoenix-mesh-controller 
-      terminationGracePeriodSeconds: 30
-      
+      serviceAccountName: phoenix-services
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: service
+                      operator: In
+                      values:
+                        - order-service
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: order-service
-          image: your-registry.io/phoenix-order-service:latest
+          image: localhost:5000/phoenix-order-service:latest
           imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 3000
-          env:
-            - name: SERVICE_NAME
-              value: "order-service"
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: order-service-config
           resources:
             requests:
-              cpu: "100m"
               memory: "128Mi"
+              cpu: "100m"
             limits:
+              memory: "256Mi"
               cpu: "500m"
-              memory: "512Mi"
-              
-        - name: sidecar-agent
-          image: your-registry.io/phoenix-sidecar:latest
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+        - name: sidecar
+          image: localhost:5000/phoenix-sidecar:latest
           imagePullPolicy: Always
           ports:
             - name: metrics
               containerPort: 9090
+              protocol: TCP
           env:
+            - name: SERVICE_NAME
+              value: "order-service"
             - name: SERVICE_URL
               value: "http://localhost:3000"
             - name: CONTROLLER_URL
-              value: "http://phoenix-mesh-controller.mesh-system.svc.cluster.local:8080"
-          
+              value: "http://phoenix-controller:8080"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -62,7 +125,151 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: PROBE_INTERVAL_MS
+              value: "5000"
+            - name: FAIL_THRESHOLD
+              value: "3"
+            - name: PROBE_TIMEOUT_MS
+              value: "2000"
+            - name: LOG_LEVEL
+              value: "info"
           resources:
             requests:
-              cpu: "50m"
               memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "250m"
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 9090
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    service: order-service
+    component: service
+spec:
+  type: ClusterIP
+  selector:
+    app: phoenix-mesh
+    service: order-service
+    component: service
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-sidecar-metrics
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    service: order-service
+    component: sidecar
+spec:
+  type: ClusterIP
+  selector:
+    app: phoenix-mesh
+    service: order-service
+    component: service
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service
+  namespace: phoenix-mesh
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-service
+  namespace: phoenix-mesh
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: phoenix-mesh
+      service: order-service
+      component: service
