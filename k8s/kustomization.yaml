@@ -1,0 +1,50 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: phoenix-mesh
+
+commonLabels:
+  app: phoenix-mesh
+  managed-by: kustomize
+commonAnnotations:
+  documentation: "https://github.com/RadhaRaniBasak/phoenix-mesh"
+  owner: "SRE Team"
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - ollama.yaml
+  - prometheus.yaml
+  - mesh-controller.yaml
+  - order-service.yaml
+  - payment-service.yaml
+  - inventory-service.yaml
+  - secrets.yaml
+images:
+  - name: localhost:5000/phoenix-controller
+    newName: your-registry/phoenix-controller
+    newTag: "1.0.0"
+  - name: localhost:5000/phoenix-sidecar
+    newName: your-registry/phoenix-sidecar
+    newTag: "1.0.0"
+  - name: localhost:5000/phoenix-order-service
+    newName: your-registry/phoenix-order-service
+    newTag: "1.0.0"
+  - name: localhost:5000/phoenix-payment-service
+    newName: your-registry/phoenix-payment-service
+    newTag: "1.0.0"
+  - name: localhost:5000/phoenix-inventory-service
+    newName: your-registry/phoenix-inventory-service
+    newTag: "1.0.0"
+replicas:
+  - name: phoenix-controller
+    count: 2
+  - name: order-service
+    count: 3
+  - name: payment-service
+    count: 3
+  - name: inventory-service
+    count: 2
+generatorOptions:
+  disableNameSuffixHash: true
