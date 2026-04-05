@@ -1,0 +1,31 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        service: [ controller, sidecar, order-service, payment-service, inventory-service ]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build ${{ matrix.service }} image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service == 'order-service' && 'service/order-service' || matrix.service == 'payment-service' && 'service/payment-service' || matrix.service == 'inventory-service' && 'service/inventory-service' || matrix.service }}
+          push: false
+          tags: phoenix-mesh/${{ matrix.service }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
