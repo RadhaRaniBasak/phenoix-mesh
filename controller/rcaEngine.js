@@ -1,181 +1,85 @@
 'use strict';
 
-import axios from 'axios';
 import pino from 'pino';
+import { generateRCAViaOllama } from './rcaProvider-ollama.js';
+import { generateRCAViaRules } from './rcaProvider-rules.js';
 
 const log = pino({ 
   level: process.env.LOG_LEVEL || 'info',
-  name: 'phoenix-rca-engine' 
+  name: 'phoenix-rca-engine'
 });
 
-//config for  analysis API
-const ANALYSIS_API_KEY = process.env.PHOENIX_ANALYSIS_API_KEY;
-const ANALYSIS_MODEL = process.env.PHOENIX_ANALYSIS_MODEL || 'gpt-4-turbo'; 
-const ANALYSIS_URL = process.env.PHOENIX_ANALYSIS_URL || 'https://api.openai.com/v1/chat/completions';
+const rcaCache = new Map();
+const CACHE_TTL_MS = parseInt(process.env.RCA_CACHE_TTL_MS || '600000'); // 10 minutes
 
-const SYSTEM_PROMPT = `You are the Phoenix Mesh Diagnostic Engine, an autonomous SRE incident analyst embedded inside a self-healing Kubernetes microservice mesh.
-
-You receive structured telemetry dumps — failure classification, Prometheus metrics, pod logs, deployment history — from services that have just failed and been automatically remediated by the Phoenix Controller.
-
-Your job:
-1. Determine the most likely root cause based on the evidence provided.
-2. Assign a confidence level (HIGH / MEDIUM / LOW).
-3. Reconstruct the incident timeline from log timestamps.
-4. Evaluate whether the Phoenix auto-remediation (Isolation/Rollback) was appropriate.
-5. Produce actionable recommendations ranked by urgency.
-6. Suggest monitoring/alerting improvements to catch this earlier.
-
-Rules:
-- Never speculate beyond what the data supports.
-- If logs are missing or ambiguous, say so explicitly in the rootCause summary.
-- Respond ONLY with valid JSON — no prose, no markdown fences, no commentary outside the JSON.
-
-Output schema (strict):
-{
-  "incidentTitle": "string (one line, <80 chars)",
-  "severity": "P1" | "P2" | "P3",
-  "rootCause": {
-    "summary": "string (2-4 sentences)",
-    "confidence": "HIGH" | "MEDIUM" | "LOW",
-    "evidence": ["string", ...],
-    "category": "CRASH" | "MEMORY_LEAK" | "DEPENDENCY_FAILURE" | "CONFIGURATION_ERROR" | "DEPLOYMENT_BUG" | "RESOURCE_EXHAUSTION" | "NETWORK_ISSUE" | "UNKNOWN"
-  },
-  "timeline": [
-    { "ts": "ISO-8601 or HH:MM:SS", "event": "string" }
-  ],
-  "autoRemediationAssessment": {
-    "wasAppropriate": true | false,
-    "explanation": "string"
-  },
-  "recommendations": [
-    {
-      "action": "string",
-      "priority": "IMMEDIATE" | "SHORT_TERM" | "LONG_TERM",
-      "rationale": "string"
-    }
-  ],
-  "alertingGaps": ["string"],
-  "preventionSteps": ["string"]
-}`;
-
-//diagnostic prompts 
-function buildPhoenixPrompt(data) {
-  const { service, failureReport, metrics, logs, deploymentInfo, remediationTaken, timestamp } = data;
-
-  const logBlock = (lines, label) => lines?.length
-    ? `### ${label}\n\`\`\`\n${lines.slice(-40).join('\n')}\n\`\`\``
-    : `### ${label}\n(Logs not available or captured)`;
-
-  return `## Phoenix Mesh Incident Report — ${service}
-
-**System Timestamp:** ${timestamp}
-**Namespace:** ${failureReport.namespace}
-**Target Pod:** ${failureReport.podName}
-
----
-
-## Failure Classification (Phoenix Sidecar Data)
-- Error type: ${failureReport.errorType}
-- Consecutive health probe failures: ${failureReport.consecutiveFails}
-- Last error message: ${failureReport.lastError?.message || 'N/A'}
-
----
-
-## Phoenix Metrics Snapshot (Last 5m)
-- Error rate: ${metrics?.errorRate ?? 'N/A'} errors/sec
-- P99 latency: ${metrics?.p99LatencyMs ?? 'N/A'} ms
-- Probe success rate: ${metrics?.probeSuccessRate ?? 'N/A'}%
-- Errors by type: ${JSON.stringify(metrics?.errorsByType || [], null, 2)}
-
----
-
-## Kubernetes Deployment State
-- Current image: ${deploymentInfo?.currentImage || 'N/A'}
-- Current revision: ${deploymentInfo?.currentRevision || 'N/A'}
-- Ready/Desired Replicas: ${deploymentInfo?.readyReplicas || 0}/${deploymentInfo?.desiredReplicas || 0}
-
----
-
-## Collected Logs
-${logBlock(logs?.current, 'App Container Logs')}
-${logBlock(logs?.previous, 'Previous Instance Logs (Post-Crash)')}
-${logBlock(logs?.sidecar, 'Phoenix Sidecar Agent Logs')}
-
-### Log Intelligence Summary
-${JSON.stringify(logs?.summary || {}, null, 2)}
-
----
-
-## Remediation Actions Taken by Phoenix Controller
-${JSON.stringify(remediationTaken || {}, null, 2)}
-
----
-
-Produce the Phoenix RCA JSON object now.`;
-}
-
-//generate RCA
-export async function generateRCA(rcaData) {
-  log.info({ service: rcaData.service }, 'Phoenix Mesh: Initiating AI RCA generation');
-
-  if (!ANALYSIS_API_KEY) {
-    log.error('Phoenix Mesh: PHOENIX_ANALYSIS_API_KEY is missing. Falling back to heuristic report.');
-    return generateFallbackRCA(rcaData, "API Key Missing");
+export async function generatePhoenixRCA(phoenixContext) {
+  const { service, failureReport } = phoenixContext;
+  //create cache
+  const cacheKey = `${service}:${failureReport.errorType}:${failureReport.consecutiveFails}`;
+  
+  //check cache
+  const cached = rcaCache.get(cacheKey);
+  if (cached && Date.now() - cached.generatedAt < CACHE_TTL_MS) {
+    log.info({ service, cacheKey }, 'RCA cache hit - returning cached analysis');
+    return { ...cached, fromCache: true };
   }
 
-  const prompt = buildPhoenixPrompt(rcaData);
+  log.info({ service }, 'Generating new RCA analysis...');
 
   try {
-    const response = await axios.post(ANALYSIS_URL, {
-      model: ANALYSIS_MODEL,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.1, // Low temperature for consistent JSON output
-    }, {
-      headers: { 
-        'Authorization': `Bearer ${ANALYSIS_API_KEY}`,
-        'Content-Type': 'application/json' 
-      },
-      timeout: 20000
-    });
-
-    const raw = response.data.choices[0]?.message?.content || '';
-
-    //JSON extraction
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      const match = raw.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error('Invalid JSON structure in AI response');
-      parsed = JSON.parse(match[0]);
-    }
-
-    log.info({ service: rcaData.service, severity: parsed.severity }, 'Phoenix Mesh: RCA successfully generated');
-    return parsed;
-
+    
+    const rca = await generateRCAViaOllama(phoenixContext);
+    
+    //store
+    rca.generatedAt = Date.now();
+    rcaCache.set(cacheKey, rca);
+    
+    log.info({ service, model: 'ollama', severity: rca.severity }, 'RCA generated successfully via Ollama');
+    return rca;
   } catch (err) {
-    log.error({ err: err.message, service: rcaData.service }, 'Phoenix Mesh: AI RCA engine failure');
-    return generateFallbackRCA(rcaData, err.message);
+    log.warn({ err: err.message }, 'Ollama RCA generation failed, falling back to rules engine');
+
+    try {
+      // Fallback to rules-based engine
+      const rca = await generateRCAViaRules(phoenixContext);
+      
+      rca.generatedAt = Date.now();
+      rcaCache.set(cacheKey, rca);
+      
+      log.info({ service, model: 'rules-based', severity: rca.severity }, 'RCA generated via fallback rules engine');
+      return rca;
+    } catch (fallbackErr) {
+      log.error({ err: fallbackErr.message }, 'Both RCA engines failed - returning minimal RCA');
+      
+      return {
+        rootCause: `${failureReport.errorType} - Unable to analyze`,
+        severity: failureReport.consecutiveFails >= 5 ? 'critical' : 'high',
+        recommendations: [
+          'Check pod logs manually',
+          'Review recent deployments',
+          'Monitor resource utilization',
+          'Verify external dependencies'
+        ],
+        model: 'error-fallback',
+        timestamp: new Date().toISOString(),
+      };
+    }
   }
 }
 
-function generateFallbackRCA(rcaData, errorReason) {
-  return {
-    incidentTitle: `Emergency Report: ${rcaData.service} Failure`,
-    severity: 'P1',
-    rootCause: {
-      summary: `Automated analysis failed due to: ${errorReason}. Manual log review is required.`,
-      confidence: 'LOW',
-      evidence: [`ErrorType: ${rcaData.failureReport?.errorType}`],
-      category: 'UNKNOWN'
-    },
-    timeline: [{ ts: new Date().toISOString(), event: 'Failure detected by Phoenix Sidecar' }],
-    autoRemediationAssessment: { wasAppropriate: true, explanation: 'Remediation triggered based on health probe failure.' },
-    recommendations: [{ action: 'Perform manual kubectl log analysis', priority: 'IMMEDIATE', rationale: 'RCA Engine Offline' }],
-    alertingGaps: ['RCA Engine Connectivity'],
-    preventionSteps: []
-  };
-}
+//periodically clears old cache entries
+setInterval(() => {
+  const now = Date.now();
+  let cleared = 0;
+  
+  for (const [key, value] of rcaCache.entries()) {
+    if (now - value.generatedAt > CACHE_TTL_MS) {
+      rcaCache.delete(key);
+      cleared++;
+    }
+  }
+  
+  if (cleared > 0) {
+    log.debug({ cleared }, 'RCA cache cleanup completed');
+  }
+}, 600000);
