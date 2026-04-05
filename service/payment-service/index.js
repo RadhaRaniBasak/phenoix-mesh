@@ -2,60 +2,167 @@
 
 import express from 'express';
 import pino from 'pino';
-
-const SERVICE_NAME = process.env.SERVICE_NAME || 'phoenix-payment-service';
-const PORT = parseInt(process.env.PORT || '3000');
+import pinoHttp from 'pino-http';
 
 const log = pino({ 
   level: process.env.LOG_LEVEL || 'info',
-  name: `phoenix-${SERVICE_NAME}`
+  name: 'payment-service' 
 });
 
 const app = express();
-app.use(express.json());
-let forceUnhealthy = process.env.FORCE_UNHEALTHY === 'true';
+const PORT = parseInt(process.env.SERVICE_PORT || '3000');
+
+app.use(express.json({ limit: '1mb' }));
+app.use(pinoHttp({ logger: log }));
+
+
+const requestMetrics = {
+  totalRequests: 0,
+  successfulRequests: 0,
+  failedRequests: 0,
+  totalProcessed: 0,
+};
+
+const transactions = new Map([
+  ['TXN-001', { id: 'TXN-001', orderId: 'ORD-001', amount: 99.99, status: 'completed', currency: 'USD' }],
+]);
 
 app.get('/health', (req, res) => {
-  if (forceUnhealthy) {
-    log.error('Phoenix Mesh: Payment health probe failed');
-    return res.status(500).json({ status: 'error', service: SERVICE_NAME });
-  }
+  requestMetrics.totalRequests++;
+  requestMetrics.successfulRequests++;
   
-  res.json({ 
-    status: 'ok', 
-    service: SERVICE_NAME, 
+  res.json({
+    status: 'ok',
+    service: 'payment-service',
     uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    metrics: {
+      totalRequests: requestMetrics.totalRequests,
+      successfulRequests: requestMetrics.successfulRequests,
+      failedRequests: requestMetrics.failedRequests,
+      totalProcessed: requestMetrics.totalProcessed,
+    },
   });
 });
 
-
-app.post('/payments', (req, res) => {
-  if (forceUnhealthy) {
-    return res.status(503).json({ error: 'Phoenix Mesh: Service unavailable' });
+app.post('/process', (req, res) => {
+  requestMetrics.totalRequests++;
+  const { orderId, amount, currency, method } = req.body;
+  
+  if (!orderId || !amount) {
+    requestMetrics.failedRequests++;
+    log.warn({ orderId, amount }, 'Invalid payment request');
+    return res.status(400).json({ error: 'Missing orderId or amount' });
   }
 
-  const payment = { 
-    id: `pay-${Date.now()}`, 
-    status: 'processed', 
-    processedBy: SERVICE_NAME,
-    ...req.body 
+  if (amount <= 0) {
+    requestMetrics.failedRequests++;
+    return res.status(400).json({ error: 'Amount must be positive' });
+  }
+
+  const transactionId = `TXN-${Date.now()}`;
+  const transaction = {
+    id: transactionId,
+    orderId,
+    amount,
+    currency: currency || 'USD',
+    method: method || 'card',
+    status: 'completed',
+    processedAt: new Date().toISOString(),
   };
 
-  log.info({ paymentId: payment.id }, 'Phoenix Mesh: Payment processed');
-  res.status(201).json(payment);
+  transactions.set(transactionId, transaction);
+  requestMetrics.successfulRequests++;
+  requestMetrics.totalProcessed += amount;
+
+  log.info({ transactionId, orderId, amount }, 'Payment processed successfully');
+  
+  res.json({
+    success: true,
+    transaction,
+    message: 'Payment processed successfully',
+  });
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  app.post('/dev/toggle-health', (req, res) => {
-    forceUnhealthy = !forceUnhealthy;
-    log.warn({ forceUnhealthy }, 'Phoenix Mesh: Payment service health state toggled');
-    res.json({ 
-      currentStatus: forceUnhealthy ? 'DEGRADED' : 'HEALTHY' 
-    });
+app.get('/transactions/:id', (req, res) => {
+  requestMetrics.totalRequests++;
+  const { id } = req.params;
+  
+  const transaction = transactions.get(id);
+  if (!transaction) {
+    requestMetrics.failedRequests++;
+    log.warn({ transactionId: id }, 'Transaction not found');
+    return res.status(404).json({ error: 'Transaction not found' });
+  }
+  
+  requestMetrics.successfulRequests++;
+  res.json(transaction);
+});
+
+app.get('/orders/:orderId/transactions', (req, res) => {
+  requestMetrics.totalRequests++;
+  const { orderId } = req.params;
+  
+  const orderTransactions = Array.from(transactions.values())
+    .filter(t => t.orderId === orderId);
+  
+  requestMetrics.successfulRequests++;
+  res.json({
+    orderId,
+    transactions: orderTransactions,
+    count: orderTransactions.length,
+    total: orderTransactions.reduce((sum, t) => sum + t.amount, 0),
   });
+});
+app.post('/transactions/:id/refund', (req, res) => {
+  requestMetrics.totalRequests++;
+  const { id } = req.params;
+  
+  const transaction = transactions.get(id);
+  if (!transaction) {
+    requestMetrics.failedRequests++;
+    return res.status(404).json({ error: 'Transaction not found' });
+  }
+
+  if (transaction.status === 'refunded') {
+    requestMetrics.failedRequests++;
+    return res.status(400).json({ error: 'Transaction already refunded' });
+  }
+
+  transaction.status = 'refunded';
+  transaction.refundedAt = new Date().toISOString();
+  requestMetrics.successfulRequests++;
+  requestMetrics.totalProcessed -= transaction.amount;
+
+  log.info({ transactionId: id }, 'Payment refunded');
+  res.json({
+    success: true,
+    transaction,
+    message: 'Payment refunded successfully',
+  });
+});
+
+const server = app.listen(PORT, () => {
+  log.info({ port: PORT }, 'Payment Service operational');
+});
+
+function gracefulShutdown(signal) {
+  log.info({ signal }, 'Payment Service: Initiating graceful shutdown');
+  
+  server.close(() => {
+    log.info('Payment Service: All connections closed');
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    log.fatal('Payment Service: Shutdown timeout, forcing exit');
+    process.exit(1);
+  }, 10000);
 }
 
-app.listen(PORT, () => {
-  log.info({ port: PORT, service: SERVICE_NAME }, 'Phoenix Mesh: Payment Service started');
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+process.on('unhandledRejection', (reason) => {
+  log.fatal({ reason }, 'Payment Service: Unhandled promise rejection');
 });
