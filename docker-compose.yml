@@ -8,7 +8,6 @@ volumes:
   prometheus_data:
   ollama_data:
 
-
 x-sidecar-env: &sidecar-env
   CONTROLLER_URL: http://phoenix-controller:8080
   PROBE_INTERVAL_MS: ${PROBE_INTERVAL_MS:-5000}
@@ -31,7 +30,7 @@ x-ollama-env: &ollama-env
   OLLAMA_HOST: 0.0.0.0:11434
 
 services:
-
+  
   prometheus:
     image: prom/prometheus:v2.48.0
     container_name: phoenix-prometheus
@@ -55,6 +54,7 @@ services:
     restart: unless-stopped
 
 
+  
   ollama:
     image: ollama/ollama:latest
     container_name: phoenix-ollama
@@ -73,7 +73,7 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  
+
   phoenix-controller:
     build:
       context: ./controller
@@ -200,7 +200,7 @@ services:
       start_period: 15s
       retries: 2
     restart: unless-stopped
-
+    
   inventory-service:
     build:
       context: ./service/inventory-service
@@ -258,4 +258,16 @@ services:
 # 9101   → Order Sidecar (Metrics & Proxy)
 # 9102   → Payment Sidecar (Metrics & Proxy)
 # 9103   → Inventory Sidecar (Metrics & Proxy)
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════════════════
+# DOCKERFILE PATHS REFERENCE
+# ════════════════════════════════════════════════════════════════════════════════
+# phoenix-controller      → ./controller/Dockerfile
+# order-service           → ./service/order-service/Dockerfile
+# order-sidecar           → ./sidecar/Dockerfile
+# payment-service         → ./service/payment-service/Dockerfile
+# payment-sidecar         → ./sidecar/Dockerfile
+# inventory-service       → ./service/inventory-service/Dockerfile
+# inventory-sidecar       → ./sidecar/Dockerfile
 # ════════════════════════════════════════════════════════════════════════════════
