@@ -14,6 +14,23 @@ x-sidecar-env: &sidecar-env
 
 services:
 
+  # ── Ollama — Self-hosted LLM for RCA ───────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: phoenix-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:11434/api/tags"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   # ── Observability Stack ─────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.48.0
@@ -44,32 +61,45 @@ services:
       - "8080:8080"
     environment:
       PORT: "8080"
-      # AI Analysis Key (Set in your .env file)
-      AI_ANALYSIS_API_KEY: ${AI_ANALYSIS_API_KEY:?AI_ANALYSIS_API_KEY is required}
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral}
+      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-60000}
+      PHOENIX_SLACK_WEBHOOK_URL: ${PHOENIX_SLACK_WEBHOOK_URL:-}
       PROMETHEUS_URL: http://phoenix-prometheus:9090
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      NODE_ENV: development
+      NODE_ENV: ${NODE_ENV:-development}
+      RECOVERY_WINDOW_MS: ${RECOVERY_WINDOW_MS:-60000}
+      RCA_CACHE_TTL_MS: ${RCA_CACHE_TTL_MS:-300000}
     depends_on:
       prometheus:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     networks: [phoenix-mesh-net]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 15s
       start_period: 10s
+      retries: 3
     restart: unless-stopped
 
   # ── Phoenix Service: Order ──────────────────────────────────────────────────
   order-service:
     build:
-      context: ./services/order-service
+      context: ./service/order-service
     container_name: phoenix-order-svc
     expose:
       - "3000"
     environment:
       SERVICE_NAME: order-service
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
 
   order-sidecar:
@@ -85,19 +115,29 @@ services:
       POD_NAME: order-pod-local
     depends_on:
       order-service:
-        condition: service_started
+        condition: service_healthy
       phoenix-controller:
         condition: service_healthy
     networks: [phoenix-mesh-net]
+    restart: unless-stopped
 
   # ── Phoenix Service: Payment ────────────────────────────────────────────────
   payment-service:
     build:
-      context: ./services/payment-service
+      context: ./service/payment-service
     container_name: phoenix-payment-svc
     expose:
       - "3000"
+    environment:
+      SERVICE_NAME: payment-service
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
 
   payment-sidecar:
@@ -113,18 +153,60 @@ services:
       POD_NAME: payment-pod-local
     depends_on:
       payment-service:
-        condition: service_started
+        condition: service_healthy
       phoenix-controller:
         condition: service_healthy
     networks: [phoenix-mesh-net]
+    restart: unless-stopped
+
+  # ── Phoenix Service: Inventory ──────────────────────────────────────────────
+  inventory-service:
+    build:
+      context: ./service/inventory-service
+    container_name: phoenix-inventory-svc
+    expose:
+      - "3000"
+    environment:
+      SERVICE_NAME: inventory-service
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  inventory-sidecar:
+    build:
+      context: ./sidecar
+    container_name: phoenix-inventory-sidecar
+    ports:
+      - "9103:9090"
+    environment:
+      <<: *sidecar-env
+      SERVICE_NAME: inventory-service
+      SERVICE_URL: http://inventory-service:3000
+      POD_NAME: inventory-pod-local
+    depends_on:
+      inventory-service:
+        condition: service_healthy
+      phoenix-controller:
+        condition: service_healthy
+    networks: [phoenix-mesh-net]
+    restart: unless-stopped
 
 volumes:
   prometheus_data:
+  ollama_data:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHOENIX MESH PORT MAP:
-#   9091 -> Prometheus Dashboard
-#   8080 -> Phoenix Controller API
-#   9101 -> Order Sidecar (Metrics & Proxy)
-#   9102 -> Payment Sidecar (Metrics & Proxy)
+#   11434 -> Ollama LLM API
+#   9091  -> Prometheus Dashboard
+#   8080  -> Phoenix Controller API
+#   9101  -> Order Sidecar (Metrics & Proxy)
+#   9102  -> Payment Sidecar (Metrics & Proxy)
+#   9103  -> Inventory Sidecar (Metrics & Proxy)
 # ─────────────────────────────────────────────────────────────────────────────

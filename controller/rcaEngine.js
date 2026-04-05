@@ -1,17 +1,12 @@
 'use strict';
 
-import axios from 'axios';
 import pino from 'pino';
+import { generateRCA as factoryGenerateRCA } from './rcaFactory.js';
 
 const log = pino({ 
   level: process.env.LOG_LEVEL || 'info',
   name: 'phoenix-rca-engine' 
 });
-
-//config for  analysis API
-const ANALYSIS_API_KEY = process.env.PHOENIX_ANALYSIS_API_KEY;
-const ANALYSIS_MODEL = process.env.PHOENIX_ANALYSIS_MODEL || 'gpt-4-turbo'; 
-const ANALYSIS_URL = process.env.PHOENIX_ANALYSIS_URL || 'https://api.openai.com/v1/chat/completions';
 
 const SYSTEM_PROMPT = `You are the Phoenix Mesh Diagnostic Engine, an autonomous SRE incident analyst embedded inside a self-healing Kubernetes microservice mesh.
 
@@ -114,50 +109,18 @@ ${JSON.stringify(remediationTaken || {}, null, 2)}
 Produce the Phoenix RCA JSON object now.`;
 }
 
-//generate RCA
-export async function generateRCA(rcaData) {
-  log.info({ service: rcaData.service }, 'Phoenix Mesh: Initiating AI RCA generation');
-
-  if (!ANALYSIS_API_KEY) {
-    log.error('Phoenix Mesh: PHOENIX_ANALYSIS_API_KEY is missing. Falling back to heuristic report.');
-    return generateFallbackRCA(rcaData, "API Key Missing");
-  }
+//generate RCA using Ollama (with rules-based fallback)
+export async function generatePhoenixRCA(rcaData) {
+  log.info({ service: rcaData.service }, 'Phoenix Mesh: Initiating Ollama RCA generation');
 
   const prompt = buildPhoenixPrompt(rcaData);
 
   try {
-    const response = await axios.post(ANALYSIS_URL, {
-      model: ANALYSIS_MODEL,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.1, // Low temperature for consistent JSON output
-    }, {
-      headers: { 
-        'Authorization': `Bearer ${ANALYSIS_API_KEY}`,
-        'Content-Type': 'application/json' 
-      },
-      timeout: 20000
-    });
-
-    const raw = response.data.choices[0]?.message?.content || '';
-
-    //JSON extraction
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      const match = raw.match(/\{[\s\S]*\}/);
-      if (!match) throw new Error('Invalid JSON structure in AI response');
-      parsed = JSON.parse(match[0]);
-    }
-
-    log.info({ service: rcaData.service, severity: parsed.severity }, 'Phoenix Mesh: RCA successfully generated');
-    return parsed;
-
+    const result = await factoryGenerateRCA(SYSTEM_PROMPT, prompt, rcaData);
+    log.info({ service: rcaData.service, severity: result.severity }, 'Phoenix Mesh: RCA successfully generated');
+    return result;
   } catch (err) {
-    log.error({ err: err.message, service: rcaData.service }, 'Phoenix Mesh: AI RCA engine failure');
+    log.error({ err: err.message, service: rcaData.service }, 'Phoenix Mesh: RCA engine failure — using emergency fallback');
     return generateFallbackRCA(rcaData, err.message);
   }
 }

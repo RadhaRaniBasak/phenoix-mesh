@@ -1,0 +1,27 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: phoenix-mesh-local
+
+scrape_configs:
+
+  # ── Phoenix Mesh Control Plane ────────────────────────────────────────────────
+  - job_name: phoenix-controller
+    static_configs:
+      - targets: ['phoenix-controller:8080']
+    metrics_path: /metrics
+
+  # ── Phoenix Sidecar Agents ────────────────────────────────────────────────────
+  - job_name: phoenix-sidecars
+    static_configs:
+      - targets:
+          - phoenix-order-sidecar:9090
+          - phoenix-payment-sidecar:9090
+          - phoenix-inventory-sidecar:9090
+    metrics_path: /metrics
+
+  # ── Prometheus Self-monitoring ────────────────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

@@ -1,0 +1,26 @@
+{
+  "name": "phoenix-inventory-service",
+  "version": "1.0.0",
+  "description": "Inventory management service for Phoenix Mesh",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": [
+    "phoenix-mesh",
+    "microservice",
+    "inventory-service",
+    "express"
+  ],
+  "author": "Radha Rani Basak",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "pino": "^8.17.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
