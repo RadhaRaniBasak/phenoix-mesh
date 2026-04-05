@@ -1,0 +1,120 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollama-config
+  namespace: phoenix-mesh
+data:
+  OLLAMA_HOST: "0.0.0.0:11434"
+  OLLAMA_NUM_PARALLEL: "1"
+  OLLAMA_KEEP_ALIVE: "5m"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-storage
+  namespace: phoenix-mesh
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    component: ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: phoenix-mesh
+      component: ollama
+  template:
+    metadata:
+      labels:
+        app: phoenix-mesh
+        component: ollama
+      annotations:
+        description: "Ollama LLM for Phoenix Mesh RCA analysis"
+    spec:
+      serviceAccountName: phoenix-services
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: api
+              containerPort: 11434
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: ollama-config
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "500m"
+            limits:
+              memory: "8Gi"
+              cpu: "2000m"
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+          livenessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: ollama-data
+          persistentVolumeClaim:
+            claimName: ollama-storage
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    component: ollama
+spec:
+  type: ClusterIP
+  selector:
+    app: phoenix-mesh
+    component: ollama
+  ports:
+    - name: api
+      port: 11434
+      targetPort: 11434
+      protocol: TCP
