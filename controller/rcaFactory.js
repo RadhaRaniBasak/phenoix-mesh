@@ -11,7 +11,7 @@ const log = pino({
 
 // Simple in-memory RCA cache to avoid redundant Ollama calls for the same incident pattern.
 const rcaCache = new Map();
-const CACHE_TTL_MS = parseInt(process.env.RCA_CACHE_TTL_MS || '300000'); // 5 min default
+const CACHE_TTL_MS = parseInt(process.env.RCA_CACHE_TTL_MS || '300000', 10) || 300000; // 5 min default
 
 function getCacheKey(rcaData) {
   return `${rcaData.service}:${rcaData.failureReport?.errorType}:${rcaData.failureReport?.consecutiveFails}`;
@@ -29,10 +29,20 @@ function getCached(key) {
 
 function setCache(key, result) {
   rcaCache.set(key, { result, cachedAt: Date.now() });
-  // Prevent unbounded growth
+  // Prevent unbounded growth — prefer evicting expired entries first
   if (rcaCache.size > 100) {
-    const oldestKey = rcaCache.keys().next().value;
-    rcaCache.delete(oldestKey);
+    const now = Date.now();
+    for (const [k, v] of rcaCache) {
+      if (now - v.cachedAt > CACHE_TTL_MS) {
+        rcaCache.delete(k);
+        if (rcaCache.size <= 100) break;
+      }
+    }
+    // If no expired entries freed enough space, remove the oldest entry
+    if (rcaCache.size > 100) {
+      const oldestKey = rcaCache.keys().next().value;
+      rcaCache.delete(oldestKey);
+    }
   }
 }
 
