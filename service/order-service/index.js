@@ -2,90 +2,146 @@
 
 import express from 'express';
 import pino from 'pino';
-
-const SERVICE_NAME = process.env.SERVICE_NAME || 'phoenix-order-service';
-const PORT = parseInt(process.env.PORT || '3000');
+import pinoHttp from 'pino-http';
 
 const log = pino({ 
   level: process.env.LOG_LEVEL || 'info',
-  name: `phoenix-${SERVICE_NAME}`
+  name: 'order-service' 
 });
 
 const app = express();
-app.use(express.json());
+const PORT = parseInt(process.env.SERVICE_PORT || '3000');
 
-// Simulates service degradation for testing Phoenix Mesh self-healing
-let forceUnhealthy = process.env.FORCE_UNHEALTHY === 'true';
-let requestCount = 0;
 
-/**
- * Phoenix Sidecar Probe Endpoint
- * The sidecar agent calls this to verify the 'Ready' status of the app.
- */
+app.use(express.json({ limit: '1mb' }));
+app.use(pinoHttp({ logger: log }));
+
+const requestMetrics = {
+  totalRequests: 0,
+  successfulRequests: 0,
+  failedRequests: 0,
+};
+
+const orders = new Map([
+  ['ORD-001', { id: 'ORD-001', status: 'completed', total: 99.99, createdAt: new Date() }],
+  ['ORD-002', { id: 'ORD-002', status: 'pending', total: 149.99, createdAt: new Date() }],
+]);
+
 app.get('/health', (req, res) => {
-  if (forceUnhealthy) {
-    log.error('Phoenix Mesh: Health probe failed (forced unhealthy state)');
-    return res.status(500).json({ 
-      status: 'error', 
-      service: SERVICE_NAME,
-      reason: 'Manual degradation triggered for Phoenix Mesh testing' 
-    });
-  }
-
+  requestMetrics.totalRequests++;
+  requestMetrics.successfulRequests++;
+  
   res.json({
     status: 'ok',
-    service: SERVICE_NAME,
+    service: 'order-service',
     uptime: process.uptime(),
-    requests: requestCount,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    metrics: {
+      totalRequests: requestMetrics.totalRequests,
+      successfulRequests: requestMetrics.successfulRequests,
+      failedRequests: requestMetrics.failedRequests,
+    },
   });
 });
-
 
 app.get('/orders', (req, res) => {
-  requestCount++;
+  requestMetrics.totalRequests++;
+  requestMetrics.successfulRequests++;
   
-  if (forceUnhealthy) {
-    return res.status(503).json({ error: 'Phoenix Mesh: Service Unavailable' });
-  }
-
+  log.info({ count: orders.size }, 'Fetching all orders');
   res.json({
-    orders: [
-      { id: 'ord-001', item: 'Coffee beans', qty: 2, status: 'shipped' },
-      { id: 'ord-002', item: 'Mechanical Keyboard', qty: 1, status: 'processing' },
-    ],
+    orders: Array.from(orders.values()),
+    count: orders.size,
   });
 });
 
-app.post('/orders', (req, res) => {
-  requestCount++;
+app.get('/orders/:id', (req, res) => {
+  requestMetrics.totalRequests++;
+  const { id } = req.params;
   
-  if (forceUnhealthy) {
-    return res.status(503).json({ error: 'Phoenix Mesh: Service Unavailable' });
+  const order = orders.get(id);
+  if (!order) {
+    requestMetrics.failedRequests++;
+    log.warn({ orderId: id }, 'Order not found');
+    return res.status(404).json({ error: 'Order not found' });
   }
+  
+  requestMetrics.successfulRequests++;
+  res.json(order);
+});
 
-  const order = { 
-    id: `ord-${Date.now()}`, 
-    ...req.body, 
-    status: 'created',
-    processedBy: SERVICE_NAME 
+// Create new order
+app.post('/orders', (req, res) => {
+  requestMetrics.totalRequests++;
+  const { items, total, customer } = req.body;
+  
+  if (!items || !total) {
+    requestMetrics.failedRequests++;
+    return res.status(400).json({ error: 'Missing required fields: items, total' });
+  }
+  
+  const orderId = `ORD-${Date.now()}`;
+  const order = {
+    id: orderId,
+    items,
+    total,
+    customer,
+    status: 'pending',
+    createdAt: new Date().toISOString(),
   };
-
-  log.info({ orderId: order.id }, 'Phoenix Mesh: Order created successfully');
+  
+  orders.set(orderId, order);
+  requestMetrics.successfulRequests++;
+  
+  log.info({ orderId, total }, 'Order created');
   res.status(201).json(order);
 });
 
-if (process.env.NODE_ENV !== 'production') {
-  app.post('/dev/toggle-health', (req, res) => {
-    forceUnhealthy = !forceUnhealthy;
-    log.warn({ forceUnhealthy }, 'Phoenix Mesh: Service health state manually toggled');
-    res.json({ 
-      currentStatus: forceUnhealthy ? 'DEGRADED' : 'HEALTHY',
-      impact: 'Sidecar probes will now begin to fail.'
-    });
+// Update order status
+app.put('/orders/:id/status', (req, res) => {
+  requestMetrics.totalRequests++;
+  const { id } = req.params;
+  const { status } = req.body;
+  
+  const order = orders.get(id);
+  if (!order) {
+    requestMetrics.failedRequests++;
+    return res.status(404).json({ error: 'Order not found' });
+  }
+  
+  if (!['pending', 'processing', 'completed', 'cancelled'].includes(status)) {
+    requestMetrics.failedRequests++;
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+  
+  order.status = status;
+  order.updatedAt = new Date().toISOString();
+  requestMetrics.successfulRequests++;
+  
+  log.info({ orderId: id, status }, 'Order status updated');
+  res.json(order);
+});
+const server = app.listen(PORT, () => {
+  log.info({ port: PORT }, 'Order Service operational');
+});
+
+function gracefulShutdown(signal) {
+  log.info({ signal }, 'Order Service: Initiating graceful shutdown');
+  
+  server.close(() => {
+    log.info('Order Service: All connections closed');
+    process.exit(0);
   });
+
+  setTimeout(() => {
+    log.fatal('Order Service: Shutdown timeout, forcing exit');
+    process.exit(1);
+  }, 10000);
 }
 
-app.listen(PORT, () => {
-  log.info({ port: PORT, service: SERVICE_NAME }, 'Phoenix Mesh: Target Service started');
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+process.on('unhandledRejection', (reason) => {
+  log.fatal({ reason }, 'Order Service: Unhandled promise rejection');
 });
