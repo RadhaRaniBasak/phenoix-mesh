@@ -1,7 +1,7 @@
 {
-  "name": "phoenix-mesh",
+  "name": "phoenix-controller",
   "version": "1.0.0",
-  "description": "Autonomous self-healing control plane for Phoenix Mesh",
+  "description": "Autonomous self-healing control plane for Phoenix Mesh with Ollama RCA",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -14,8 +14,9 @@
     "mesh",
     "self-healing",
     "phoenix-mesh",
-    "sre",
-    "automation"
+    "ollama",
+    "llm",
+    "rca"
   ],
   "author": "Radha Rani Basak",
   "license": "MIT",
@@ -27,6 +28,7 @@
     "pino-http": "^9.0.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.0.0",
+    "npm": ">=9.0.0"
   }
 }
