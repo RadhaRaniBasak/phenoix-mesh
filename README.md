@@ -1,5 +1,7 @@
 # Phoenix Mesh 🔥
 
+[![CI - Phoenix Mesh Build & Test](https://github.com/RadhaRaniBasak/phoenix-mesh/actions/workflows/ci.yml/badge.svg)](https://github.com/RadhaRaniBasak/phoenix-mesh/actions/workflows/ci.yml)
+
 A **self-healing microservice mesh** with intelligent sidecars, autonomous control plane, and automatic rollback capabilities. Uses **local Ollama LLM** for AI-powered Root Cause Analysis (RCA).
 
 ## Overview
@@ -93,6 +95,9 @@ curl http://localhost:9101/status
 
 # Payment Sidecar
 curl http://localhost:9102/status
+
+# Inventory Sidecar
+curl http://localhost:9103/status
 ```
 
 ## Configuration 🔧
@@ -235,6 +240,15 @@ curl http://localhost:9101/metrics
 - **GET /orders/:orderId/transactions** - List transactions
 - **POST /transactions/:id/refund** - Refund payment
 
+### Inventory Service (Port 3000)
+
+- **GET /health** - Health check
+- **GET /inventory** - List inventory items
+- **GET /inventory/:id** - Get item details
+- **POST /inventory** - Add new item
+- **PUT /inventory/:id** - Update item quantity
+- **DELETE /inventory/:id** - Remove item
+
 ## Testing Failure Scenarios 🧪
 
 ### 1. **Trigger Test Failure**
@@ -336,6 +350,7 @@ cat prometheus.yml | grep -A5 "job_name"
 # Verify sidecars are exposing metrics
 curl http://localhost:9101/metrics
 curl http://localhost:9102/metrics
+curl http://localhost:9103/metrics
 ```
 
 ### **Sidecars can't reach services**

@@ -158,7 +158,56 @@ services:
       retries: 2
     restart: unless-stopped
 
-  # payment S.
+  # INVENTORY SERVICE
+  inventory-service:
+    build:
+      context: ./service/inventory-service
+      dockerfile: Dockerfile
+    container_name: phoenix-inventory-svc
+    expose:
+      - "3000"
+    environment:
+      <<: *service-env
+      SERVICE_NAME: inventory-service
+      SERVICE_PORT: "3000"
+    networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 2
+    restart: unless-stopped
+
+  inventory-sidecar:
+    build:
+      context: ./sidecar
+      dockerfile: Dockerfile
+    container_name: phoenix-inventory-sidecar
+    ports:
+      - "9103:9090"
+    environment:
+      <<: *sidecar-env
+      SERVICE_NAME: inventory-service
+      SERVICE_URL: http://inventory-service:3000
+      POD_NAME: inventory-pod-local
+      POD_NAMESPACE: default
+      SIDECAR_PORT: "9090"
+    depends_on:
+      inventory-service:
+        condition: service_healthy
+      phoenix-controller:
+        condition: service_healthy
+    networks: [phoenix-mesh-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/status"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 2
+    restart: unless-stopped
+
+  # PAYMENT SERVICE
   payment-service:
     build:
       context: ./service/payment-service
@@ -215,4 +264,5 @@ services:
 # 11434  → Ollama LLM API
 # 9101   → Order Sidecar (Metrics & Proxy)
 # 9102   → Payment Sidecar (Metrics & Proxy)
+# 9103   → Inventory Sidecar (Metrics & Proxy)
 # ═══════════════════════════════════════════════════════════════════════════════

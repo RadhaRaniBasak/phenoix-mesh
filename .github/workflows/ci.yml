@@ -1,0 +1,59 @@
+name: CI - Phoenix Mesh Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config
+
+      - name: Build all Docker images
+        run: docker compose build
+
+      - name: Start all services
+        run: docker compose up -d
+
+      - name: Wait for services to become healthy
+        run: |
+          echo "Waiting 45 seconds for services to initialize..."
+          sleep 45
+
+      - name: Check service status
+        run: docker compose ps
+
+      - name: Health check - Phoenix Controller
+        run: curl -f http://localhost:8080/health
+
+      - name: Health check - Prometheus
+        run: curl -f http://localhost:9091/-/healthy
+
+      - name: Health check - Order Sidecar
+        run: curl -f http://localhost:9101/status
+
+      - name: Health check - Payment Sidecar
+        run: curl -f http://localhost:9102/status
+
+      - name: Health check - Inventory Sidecar
+        run: curl -f http://localhost:9103/status
+
+      - name: Print service logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down services
+        if: always()
+        run: docker compose down --volumes
