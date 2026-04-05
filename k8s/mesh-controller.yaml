@@ -1,102 +1,177 @@
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: phoenix-controller-config
+  namespace: phoenix-mesh
+data:
+  PORT: "8080"
+  LOG_LEVEL: "info"
+  NODE_ENV: "production"
+  K8S_IN_CLUSTER: "true"
+  PROMETHEUS_URL: "http://prometheus:9090"
+  RCA_PROVIDER: "ollama"
+  OLLAMA_HOST: "http://ollama:11434"
+  OLLAMA_MODEL: "mistral"
+  OLLAMA_TIMEOUT_MS: "60000"
+  RECOVERY_WINDOW_MS: "60000"
+  ERROR_RATE_THRESHOLD: "0.01"
+  RCA_CACHE_TTL_MS: "600000"
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mesh-controller
-  namespace: mesh-system
+  name: phoenix-controller
+  namespace: phoenix-mesh
   labels:
-    app: mesh-controller
-  annotations:
-    description: "Autonomous self-healing mesh controller"
+    app: phoenix-mesh
+    component: controller
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
-      app: mesh-controller
+      app: phoenix-mesh
+      component: controller
   template:
     metadata:
       labels:
-        app: mesh-controller
+        app: phoenix-mesh
+        component: controller
+      annotations:
+        description: "Phoenix Mesh Control Plane - Autonomous Self-Healing Engine"
     spec:
-      serviceAccountName: mesh-controller
-      terminationGracePeriodSeconds: 30
-
+      serviceAccountName: phoenix-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - phoenix-mesh
+                    - key: component
+                      operator: In
+                      values:
+                        - controller
+                topologyKey: kubernetes.io/hostname
       containers:
-        - name: mesh-controller
-          image: your-registry.io/mesh-controller:latest
+        - name: controller
+          image: localhost:5000/phoenix-controller:latest
           imagePullPolicy: Always
           ports:
-            - name: http
+            - name: api
               containerPort: 8080
               protocol: TCP
-
+          envFrom:
+            - configMapRef:
+                name: phoenix-controller-config
           env:
-            - name: PORT
-              value: "8080"
-            - name: K8S_IN_CLUSTER
-              value: "true"
-            - name: NODE_ENV
-              value: "production"
-            - name: LOG_LEVEL
-              value: "info"
-            - name: PROMETHEUS_URL
-              value: "http://prometheus.mesh-system.svc.cluster.local:9090"
-            - name: RECOVERY_WINDOW_MS
-              value: "60000"
-            - name: ERROR_RATE_THRESHOLD
-              value: "0.01"
-
-            # Secrets
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mesh-secrets
-                  key: ANTHROPIC_API_KEY
             - name: SLACK_WEBHOOK_URL
               valueFrom:
                 secretKeyRef:
-                  name: mesh-secrets
-                  key: SLACK_WEBHOOK_URL
+                  name: phoenix-secrets
+                  key: slack-webhook
                   optional: true
-
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 20
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
             failureThreshold: 3
-
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /health
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
-            failureThreshold: 3
-
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
+            timeoutSeconds: 5
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: mesh-controller
-  namespace: mesh-system
+  name: phoenix-controller
+  namespace: phoenix-mesh
   labels:
-    app: mesh-controller
+    app: phoenix-mesh
+    component: controller
 spec:
+  type: ClusterIP
   selector:
-    app: mesh-controller
+    app: phoenix-mesh
+    component: controller
   ports:
-    - name: http
-      port: 80
+    - name: api
+      port: 8080
       targetPort: 8080
       protocol: TCP
-  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: phoenix-controller-external
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    component: controller
+spec:
+  type: LoadBalancer
+  selector:
+    app: phoenix-mesh
+    component: controller
+  ports:
+    - name: api
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: phoenix-controller
+  namespace: phoenix-mesh
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: phoenix-mesh
+      component: controller
