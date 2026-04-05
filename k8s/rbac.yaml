@@ -2,42 +2,68 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: phoenix-mesh-controller
-  namespace: mesh-system
+  name: phoenix-controller
+  namespace: phoenix-mesh
   labels:
-    app.kubernetes.io/part-of: phoenix-mesh
+    app: phoenix-mesh
+    component: controller
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: phoenix-mesh-controller
+  name: phoenix-controller
+  labels:
+    app: phoenix-mesh
+    component: controller
 rules:
-  - apiGroups: [""]
-    resources: ["pods", "pods/log", "services", "endpoints", "namespaces"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["patch", "update"]
-
   - apiGroups: ["apps"]
-    resources: ["deployments", "deployments/rollback", "replicasets"]
+    resources: ["deployments", "deployments/status"]
     verbs: ["get", "list", "watch", "patch", "update"]
-
+  
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  
+  - apiGroups: [""]
+    resources: ["pods", "pods/status", "pods/log"]
+    verbs: ["get", "list", "watch", "patch", "create"]
+  
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: phoenix-mesh-controller-binding
+  name: phoenix-controller
+  labels:
+    app: phoenix-mesh
+    component: controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: phoenix-mesh-controller
+  name: phoenix-controller
 subjects:
   - kind: ServiceAccount
-    name: phoenix-mesh-controller
-    namespace: mesh-system
+    name: phoenix-controller
+    namespace: phoenix-mesh
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: phoenix-services
+  namespace: phoenix-mesh
+  labels:
+    app: phoenix-mesh
+    component: services
