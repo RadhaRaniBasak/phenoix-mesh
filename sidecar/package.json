@@ -1,24 +1,25 @@
 {
-  "name": "phoenix-mesh",
+  "name": "phoenix-sidecar",
   "version": "1.0.0",
-  "description": "Central control plane for Phoenix Mesh - handling AI analysis and K8s rollbacks",
+  "description": "Service sidecar for Phoenix Mesh - health monitoring & request proxying",
   "type": "module",
-  "main": "index.js",
+  "main": "agent.js",
   "author": "Radha Rani Basak",
   "license": "MIT",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js",
+    "start": "node agent.js",
+    "dev": "node --watch agent.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "@kubernetes/client-node": "^0.20.0",
     "axios": "^1.6.0",
     "express": "^4.18.2",
     "pino": "^8.17.0",
-    "pino-http": "^8.5.0"
+    "pino-http": "^9.0.0",
+    "prom-client": "^15.0.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0",
+    "npm": ">=9.0.0"
   }
 }
