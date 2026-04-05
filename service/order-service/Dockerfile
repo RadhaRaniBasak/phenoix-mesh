@@ -19,4 +19,4 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=2 \
 
 USER node
 
-CMD ["node", "app.js"]
+CMD ["node", "index.js"]
