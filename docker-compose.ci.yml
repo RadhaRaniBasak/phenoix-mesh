@@ -1,0 +1,8 @@
+services:
+  #avoid pulling/running Ollama in CI 
+  phoenix-controller:
+    environment:
+      RCA_PROVIDER: rules
+    depends_on:
+      prometheus:
+        condition: service_healthy
