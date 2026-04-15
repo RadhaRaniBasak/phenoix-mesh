@@ -9,46 +9,65 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
+
       - name: Build Docker images
         run: docker compose build
-      
+
       - name: Start services
         run: docker compose up -d
-      
-      - name: Wait for services to be healthy
+
+      - name: Wait for phoenix-controller to be healthy (print diagnostics on failure)
         run: |
+          set -euo pipefail
+
+          echo "Waiting for phoenix-controller health..."
           for i in {1..60}; do
-            if docker compose ps | grep -qE "healthy.*healthy.*healthy"; then
-              echo "Services are healthy"
-              exit 0
+            STATUS="$(docker inspect -f '{{.State.Health.Status}}' phoenix-controller 2>/dev/null || echo missing)"
+            echo "phoenix-controller health: ${STATUS} ($i/60)"
+            if [ "${STATUS}" = "healthy" ]; then
+              echo "phoenix-controller is healthy"
+              break
             fi
-            echo "Waiting for services... ($i/60)"
+            if [ "${STATUS}" = "unhealthy" ]; then
+              echo "phoenix-controller became unhealthy"
+              break
+            fi
             sleep 2
           done
-          echo "Services failed to become healthy"
-          docker compose logs
-          exit 1
-      
+
+          STATUS="$(docker inspect -f '{{.State.Health.Status}}' phoenix-controller 2>/dev/null || echo missing)"
+          if [ "${STATUS}" != "healthy" ]; then
+            echo "Services failed to become healthy"
+            echo "--- docker compose ps ---"
+            docker compose ps || true
+            echo "--- phoenix-ollama health ---"
+            docker inspect -f '{{json .State.Health}}' phoenix-ollama || true
+            echo "--- phoenix-ollama logs ---"
+            docker compose logs --no-color --tail=300 ollama || true
+            echo "--- phoenix-controller logs ---"
+            docker compose logs --no-color --tail=300 phoenix-controller || true
+            exit 1
+          fi
+
       - name: Run health checks
         run: |
           echo "Checking phoenix-controller health..."
           curl -f http://localhost:8080/health || exit 1
-          
+
           echo "Checking order-sidecar health..."
           curl -f http://localhost:9101/status || exit 1
-          
+
           echo "Checking payment-sidecar health..."
           curl -f http://localhost:9102/status || exit 1
-          
+
           echo "All health checks passed!"
-      
+
       - name: Cleanup
         if: always()
         run: docker compose down
