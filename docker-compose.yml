@@ -1,272 +1,43 @@
-version: '3.9'
-
-networks:
-  phoenix-mesh-net:
-    driver: bridge
-
-volumes:
-  prometheus_data:
-  ollama_data:
-
-x-sidecar-env: &sidecar-env
-  CONTROLLER_URL: http://phoenix-controller:8080
-  PROBE_INTERVAL_MS: ${PROBE_INTERVAL_MS:-5000}
-  FAIL_THRESHOLD: ${FAIL_THRESHOLD:-3}
-  PROBE_TIMEOUT_MS: ${PROBE_TIMEOUT_MS:-2000}
-  LOG_LEVEL: ${LOG_LEVEL:-info}
-
-x-service-env: &service-env
-  LOG_LEVEL: ${LOG_LEVEL:-info}
-  NODE_ENV: ${NODE_ENV:-development}
-
-x-controller-env: &controller-env
-  PORT: "8080"
-  LOG_LEVEL: ${LOG_LEVEL:-info}
-  NODE_ENV: ${NODE_ENV:-development}
-  PROMETHEUS_URL: http://prometheus:9090
-  K8S_IN_CLUSTER: ${K8S_IN_CLUSTER:-false}
-
-x-ollama-env: &ollama-env
-  OLLAMA_HOST: 0.0.0.0:11434
-
-services:
+ services:
+   
+   prometheus:
+     image: prom/prometheus:v2.48.0
+     container_name: phoenix-prometheus
+@@
+     restart: unless-stopped
   
-  prometheus:
-    image: prom/prometheus:v2.48.0
-    container_name: phoenix-prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --web.enable-lifecycle
-      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
-    ports:
-      - "9091:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    networks: [phoenix-mesh-net]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    restart: unless-stopped
-
-
-  
- ollama:
-  image: ollama/ollama:latest
-  container_name: phoenix-ollama
-  environment:
-    <<: *ollama-env
-  ports:
-    - "11434:11434"
-  volumes:
-    - ollama_data:/root/.ollama
-  networks: [phoenix-mesh-net]
-  healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-    interval: 30s
-    timeout: 15s   
-    retries: 5          
-    start_period: 60s     
-  restart: unless-stopped
-
-  phoenix-controller:
-    build:
-      context: ./controller
-      dockerfile: Dockerfile
-    container_name: phoenix-controller
-    ports:
-      - "8080:8080"
-    environment:
-      <<: *controller-env
-      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
-      RCA_PROVIDER: ${RCA_PROVIDER:-ollama}
-      OLLAMA_HOST: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral}
-      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-60000}
-      RECOVERY_WINDOW_MS: ${RECOVERY_WINDOW_MS:-60000}
-      ERROR_RATE_THRESHOLD: ${ERROR_RATE_THRESHOLD:-0.01}
-      RCA_CACHE_TTL_MS: ${RCA_CACHE_TTL_MS:-600000}
-    depends_on:
-      prometheus:
-        condition: service_healthy
-      ollama:
-        condition: service_healthy
-    networks: [phoenix-mesh-net]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 15s
-      timeout: 5s
-      start_period: 15s
-      retries: 3
-    restart: unless-stopped
-
-  order-service:
-    build:
-      context: ./service/order-service
-      dockerfile: Dockerfile
-    container_name: phoenix-order-svc
-    expose:
-      - "3000"
-    environment:
-      <<: *service-env
-      SERVICE_NAME: order-service
-      SERVICE_PORT: "3000"
-    networks: [phoenix-mesh-net]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
-      interval: 10s
-      timeout: 5s
-      start_period: 10s
-      retries: 2
-    restart: unless-stopped
-
-  order-sidecar:
-    build:
-      context: ./sidecar
-      dockerfile: Dockerfile
-    container_name: phoenix-order-sidecar
-    ports:
-      - "9101:9090"
-    environment:
-      <<: *sidecar-env
-      SERVICE_NAME: order-service
-      SERVICE_URL: http://order-service:3000
-      POD_NAME: order-pod-local
-      POD_NAMESPACE: default
-      SIDECAR_PORT: "9090"
-    depends_on:
-      order-service:
-        condition: service_healthy
-      phoenix-controller:
-        condition: service_healthy
-    networks: [phoenix-mesh-net]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9090/status"]
-      interval: 10s
-      timeout: 5s
-      start_period: 15s
-      retries: 2
-    restart: unless-stopped
-
-  payment-service:
-    build:
-      context: ./service/payment-service
-      dockerfile: Dockerfile
-    container_name: phoenix-payment-svc
-    expose:
-      - "3000"
-    environment:
-      <<: *service-env
-      SERVICE_NAME: payment-service
-      SERVICE_PORT: "3000"
-    networks: [phoenix-mesh-net]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
-      interval: 10s
-      timeout: 5s
-      start_period: 10s
-      retries: 2
-    restart: unless-stopped
-
-  payment-sidecar:
-    build:
-      context: ./sidecar
-      dockerfile: Dockerfile
-    container_name: phoenix-payment-sidecar
-    ports:
-      - "9102:9090"
-    environment:
-      <<: *sidecar-env
-      SERVICE_NAME: payment-service
-      SERVICE_URL: http://payment-service:3000
-      POD_NAME: payment-pod-local
-      POD_NAMESPACE: default
-      SIDECAR_PORT: "9090"
-    depends_on:
-      payment-service:
-        condition: service_healthy
-      phoenix-controller:
-        condition: service_healthy
-    networks: [phoenix-mesh-net]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9090/status"]
-      interval: 10s
-      timeout: 5s
-      start_period: 15s
-      retries: 2
-    restart: unless-stopped
-    
-  inventory-service:
-    build:
-      context: ./service/inventory-service
-      dockerfile: Dockerfile
-    container_name: phoenix-inventory-svc
-    expose:
-      - "3000"
-    environment:
-      <<: *service-env
-      SERVICE_NAME: inventory-service
-      SERVICE_PORT: "3000"
-    networks: [phoenix-mesh-net]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
-      interval: 10s
-      timeout: 5s
-      start_period: 10s
-      retries: 2
-    restart: unless-stopped
-
-  inventory-sidecar:
-    build:
-      context: ./sidecar
-      dockerfile: Dockerfile
-    container_name: phoenix-inventory-sidecar
-    ports:
-      - "9103:9090"
-    environment:
-      <<: *sidecar-env
-      SERVICE_NAME: inventory-service
-      SERVICE_URL: http://inventory-service:3000
-      POD_NAME: inventory-pod-local
-      POD_NAMESPACE: default
-      SIDECAR_PORT: "9090"
-    depends_on:
-      inventory-service:
-        condition: service_healthy
-      phoenix-controller:
-        condition: service_healthy
-    networks: [phoenix-mesh-net]
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9090/status"]
-      interval: 10s
-      timeout: 5s
-      start_period: 15s
-      retries: 2
-    restart: unless-stopped
-
-# ════════════════════════════════════════════════════════════════════════════════
-# PORT MAPPING REFERENCE
-# ════════════════════════════════════════════════════════════════════════════════
-# 9091   → Prometheus Dashboard
-# 8080   → Phoenix Controller API  
-# 11434  → Ollama LLM API
-# 9101   → Order Sidecar (Metrics & Proxy)
-# 9102   → Payment Sidecar (Metrics & Proxy)
-# 9103   → Inventory Sidecar (Metrics & Proxy)
-# ════════════════════════════════════════════════════════════════════════════════
-
-# ════════════════════════════════════════════════════════════════════════════════
-# DOCKERFILE PATHS REFERENCE
-# ════════════════════════════════════════════════════════════════════════════════
-# phoenix-controller      → ./controller/Dockerfile
-# order-service           → ./service/order-service/Dockerfile
-# order-sidecar           → ./sidecar/Dockerfile
-# payment-service         → ./service/payment-service/Dockerfile
-# payment-sidecar         → ./sidecar/Dockerfile
-# inventory-service       → ./service/inventory-service/Dockerfile
-# inventory-sidecar       → ./sidecar/Dockerfile
-# ════════════════════════════════════════════════════════════════════════════════
+-   
+-  ollama:
+-   image: ollama/ollama:latest
+-   container_name: phoenix-ollama
+-   environment:
+-     <<: *ollama-env
+-   ports:
+-     - "11434:11434"
+-   volumes:
+-     - ollama_data:/root/.ollama
+-   networks: [phoenix-mesh-net]
+-   healthcheck:
+-     test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+-     interval: 30s
+-     timeout: 15s   
+-     retries: 5          
+-     start_period: 60s     
+-   restart: unless-stopped
++  ollama:
++    image: ollama/ollama:latest
++    container_name: phoenix-ollama
++    environment:
++      <<: *ollama-env
++    ports:
++      - "11434:11434"
++    volumes:
++      - ollama_data:/root/.ollama
++    networks: [phoenix-mesh-net]
++    healthcheck:
++      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
++      interval: 30s
++      timeout: 15s
++      retries: 5
++      start_period: 60s
++    restart: unless-stopped
