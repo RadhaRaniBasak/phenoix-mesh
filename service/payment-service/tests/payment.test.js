@@ -103,7 +103,7 @@ describe('Payment Service', () => {
       expect(res.body.transactions).toEqual([]);
     });
 
-    it('calculates the correct total for an orders transactions', async () => {
+    it('calculates the correct total for an order\'s transactions', async () => {
       // Process two payments for the same order
       await request(app).post('/process').send({ orderId: 'ORD-TOTAL-TEST', amount: 10 });
       await request(app).post('/process').send({ orderId: 'ORD-TOTAL-TEST', amount: 20 });
