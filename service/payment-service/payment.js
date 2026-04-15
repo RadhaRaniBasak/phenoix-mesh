@@ -3,6 +3,7 @@
 import express from 'express';
 import pino from 'pino';
 import pinoHttp from 'pino-http';
+import { fileURLToPath } from 'url';
 
 const log = pino({ 
   level: process.env.LOG_LEVEL || 'info',
@@ -142,6 +143,9 @@ app.post('/transactions/:id/refund', (req, res) => {
   });
 });
 
+export { app };
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
 const server = app.listen(PORT, () => {
   log.info({ port: PORT }, 'Payment Service operational');
 });
@@ -166,3 +170,4 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('unhandledRejection', (reason) => {
   log.fatal({ reason }, 'Payment Service: Unhandled promise rejection');
 });
+}

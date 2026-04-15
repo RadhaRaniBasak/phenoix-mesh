@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "keywords": [
     "phoenix-mesh",
@@ -25,5 +27,9 @@
   "engines": {
     "node": ">=20.0.0",
     "npm": ">=9.0.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0",
+    "vitest": "^3.1.1"
   }
 }

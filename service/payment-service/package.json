@@ -6,6 +6,9 @@
   "main": "payment.js",
   "scripts": {
     "start": "node payment.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "dev": "node --watch payment.js"
   },
   "keywords": [
@@ -18,9 +21,14 @@
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
-    "pino": "^8.17.0"
+    "pino": "^8.17.0",
+    "pino-http": "^11.0.0"
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0",
+    "vitest": "^3.1.1"
   }
 }

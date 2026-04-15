@@ -8,9 +8,8 @@ const log = pino({
   name: 'slack-notifier'
 });
 
-const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
-
 export async function postPhoenixIncident(service, rcaReport, remediationSummary) {
+  const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
   if (!SLACK_WEBHOOK_URL) {
     log.info('Slack webhook not configured, skipping notification');
     return;

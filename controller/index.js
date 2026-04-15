@@ -4,6 +4,7 @@ import express from 'express';
 import pino from 'pino';
 import pinoHttp from 'pino-http';
 import k8s from '@kubernetes/client-node';
+import { fileURLToPath } from 'url';
 
 //internal m.
 import { handleFailure, handleRecovery, getActiveIncidents } from './meshController.js';
@@ -145,6 +146,11 @@ if (process.env.NODE_ENV !== 'production') {
 
 //lifecycle management
 
+export { app };
+
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
+
+if (isMain) {
 const server = app.listen(PORT, () => {
   log.info({ port: PORT, k8sReady }, 'Phoenix Mesh Controller operational');
 });
@@ -170,3 +176,4 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('unhandledRejection', (reason) => {
   log.fatal({ reason }, 'Phoenix Mesh Controller: Unhandled promise rejection detected');
 });
+}
