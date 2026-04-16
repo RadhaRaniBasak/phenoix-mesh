@@ -2,6 +2,7 @@
 
 import express from 'express';
 import pino from 'pino';
+import { fileURLToPath } from 'url';
 
 const SERVICE_NAME = process.env.SERVICE_NAME || 'phoenix-inventory-service';
 const PORT = parseInt(process.env.PORT || '3000');
@@ -58,6 +59,10 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-app.listen(PORT, () => {
-  log.info({ port: PORT, service: SERVICE_NAME }, 'Phoenix Mesh: Inventory Service started');
-});
+export { app };
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  app.listen(PORT, () => {
+    log.info({ port: PORT, service: SERVICE_NAME }, 'Phoenix Mesh: Inventory Service started');
+  });
+}
