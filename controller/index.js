@@ -1,129 +1,179 @@
 'use strict';
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import request from 'supertest';
+import express from 'express';
+import pino from 'pino';
+import pinoHttp from 'pino-http';
+import k8s from '@kubernetes/client-node';
+import { fileURLToPath } from 'url';
 
-// Mock all heavy dependencies before importing the app
-vi.mock('../meshController.js', () => ({
-  handleFailure: vi.fn().mockResolvedValue({ status: 'resolved', severity: 'high' }),
-  handleRecovery: vi.fn(),
-  getActiveIncidents: vi.fn().mockReturnValue([]),
+//internal m.
+import { handleFailure, handleRecovery, getActiveIncidents } from './meshController.js';
+import { initK8sClients } from './rollback.js';
+import { initK8sClient as initLogClient } from './logs.js';
+
+const log = pino({ 
+  level: process.env.LOG_LEVEL || 'info',
+  name: 'phoenix-controller' 
+});
+
+const app = express();
+const PORT = parseInt(process.env.PORT || '8080');
+
+// Middleware
+app.use(express.json({ limit: '1mb' }));
+app.use(pinoHttp({ 
+  logger: log,
+  genReqId: (req) => req.headers['x-request-id'] || Math.random().toString(36).substring(7)
 }));
-vi.mock('../rollback.js', () => ({
-  initK8sClients: vi.fn(),
-}));
-vi.mock('../logs.js', () => ({
-  initK8sClient: vi.fn(),
-}));
-// Prevent k8s client from trying to load config files
-vi.mock('@kubernetes/client-node', () => ({
-  default: {
-    KubeConfig: class {
-      loadFromFile() {}
-      loadFromCluster() {}
-      loadFromDefault() {}
-      makeApiClient() { return {}; }
-    },
-  },
-}));
 
-import { handleFailure, handleRecovery, getActiveIncidents } from '../meshController.js';
-import { app } from '../index.js';
+//K8s Infrastr.
+let k8sReady = false;
 
-describe('Controller API', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    handleFailure.mockResolvedValue({ status: 'resolved', severity: 'high' });
-    getActiveIncidents.mockReturnValue([]);
+function initPhoenixK8s() {
+  try {
+    const kc = new k8s.KubeConfig();
+
+    if (process.env.KUBECONFIG) {
+      kc.loadFromFile(process.env.KUBECONFIG);
+      log.info('Loading KubeConfig from local file');
+    } else if (process.env.K8S_IN_CLUSTER === 'true') {
+      kc.loadFromCluster();
+      log.info('Running inside Kubernetes cluster');
+    } else {
+      kc.loadFromDefault(); // local dev — uses ~/.kube/config
+      log.info('Using default local KubeConfig context');
+    }
+
+    //downstream services initialisations 
+    initK8sClients(kc);
+    initLogClient(kc);
+    
+    k8sReady = true;
+    log.info('Phoenix Mesh: Kubernetes clients successfully initialized');
+  } catch (err) {
+    log.warn(
+      { err: err.message }, 
+      'Phoenix Mesh: Kubernetes initialization failed. Running in MOCK mode (No rollbacks available).'
+    );
+    k8sReady = false;
+  }
+}
+
+initPhoenixK8s();
+
+//incident handling
+
+app.post('/api/failure', async (req, res) => {
+  const report = req.body;
+
+  if (!report?.service || !report?.podName || !report?.namespace) {
+    log.error({ payload: report }, 'Invalid failure report received');
+    return res.status(400).json({
+      error: 'Missing required identity fields: service, podName, namespace',
+    });
+  }
+  res.status(202).json({ 
+    status: 'acknowledged', 
+    incidentId: `${report.namespace}/${report.service}`,
+    ts: new Date().toISOString()
   });
 
-  describe('GET /health', () => {
-    it('returns 200 with status ok', async () => {
-      const res = await request(app).get('/health');
-      expect(res.status).toBe(200);
-      expect(res.body.status).toBe('ok');
-      expect(res.body.mesh).toBe('phoenix');
-    });
-  });
-
-  describe('GET /api/incidents', () => {
-    it('returns empty incident list', async () => {
-      const res = await request(app).get('/api/incidents');
-      expect(res.status).toBe(200);
-      expect(res.body.system).toBe('phoenix-mesh');
-      expect(res.body.incidents).toEqual([]);
-    });
-
-    it('returns active incidents when present', async () => {
-      getActiveIncidents.mockReturnValue([
-        { key: 'default/svc', service: 'svc', startedAt: Date.now(), steps: [] },
-      ]);
-      const res = await request(app).get('/api/incidents');
-      expect(res.status).toBe(200);
-      expect(res.body.active_count).toBe(1);
-      expect(res.body.incidents).toHaveLength(1);
-    });
-  });
-
-  describe('POST /api/failure', () => {
-    const validReport = {
-      service: 'inventory',
-      podName: 'inventory-abc',
-      namespace: 'default',
-      errorType: 'CRASH',
-      consecutiveFails: 3,
-    };
-
-    it('returns 400 when required fields are missing', async () => {
-      const res = await request(app)
-        .post('/api/failure')
-        .send({ service: 'inventory' }); // missing podName and namespace
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/Missing required/);
-    });
-
-    it('returns 202 for a valid failure report', async () => {
-      const res = await request(app).post('/api/failure').send(validReport);
-      expect(res.status).toBe(202);
-      expect(res.body.status).toBe('acknowledged');
-      expect(res.body.incidentId).toBe('default/inventory');
-    });
-
-    it('returns 400 when body is empty', async () => {
-      const res = await request(app).post('/api/failure').send({});
-      expect(res.status).toBe(400);
-    });
-  });
-
-  describe('POST /api/recovery', () => {
-    it('returns 400 when required fields are missing', async () => {
-      const res = await request(app).post('/api/recovery').send({ service: 'svc' });
-      expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/Missing required/);
-    });
-
-    it('returns 200 for a valid recovery report', async () => {
-      const res = await request(app)
-        .post('/api/recovery')
-        .send({ service: 'inventory', namespace: 'default' });
-      expect(res.status).toBe(200);
-      expect(res.body.status).toBe('recovered');
-      expect(handleRecovery).toHaveBeenCalledOnce();
-    });
-  });
-
-  describe('POST /api/test/failure (non-production only)', () => {
-    it('returns 202 with test_triggered status', async () => {
-      const originalEnv = process.env.NODE_ENV;
-      process.env.NODE_ENV = 'test';
-
-      const res = await request(app)
-        .post('/api/test/failure')
-        .send({ service: 'test-svc', errorType: 'TIMEOUT' });
-
-      expect(res.status).toBe(202);
-      expect(res.body.status).toBe('test_triggered');
-      process.env.NODE_ENV = originalEnv;
-    });
+  handleFailure(report).catch(err => {
+    log.error({ err: err.message, service: report.service }, 'Phoenix Mesh: Critical failure in incident handler');
   });
 });
+
+app.post('/api/recovery', (req, res) => {
+  const report = req.body;
+  
+  if (!report?.service || !report?.namespace) {
+    return res.status(400).json({ error: 'Missing required recovery fields: service, namespace' });
+  }
+
+  handleRecovery(report);
+  
+  log.info({ service: report.service }, 'Phoenix Mesh: Service recovery acknowledged');
+  res.json({ status: 'recovered', service: report.service });
+});
+
+//Observability r.
+
+app.get('/api/incidents', (req, res) => {
+  res.json({ 
+    system: 'phoenix-mesh',
+    active_count: getActiveIncidents().length,
+    incidents: getActiveIncidents() 
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    mesh: 'phoenix',
+    k8sReady,
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+//dvlpmnt  & test tools
+
+if (process.env.NODE_ENV !== 'production') {
+  app.post('/api/test/failure', async (req, res) => {
+    const mockReport = {
+      event: 'FAILURE',
+      service: req.body.service || 'phoenix-test-service',
+      podName: req.body.podName || 'phoenix-test-pod-x1y2',
+      namespace: req.body.namespace || 'default',
+      errorType: req.body.errorType || 'CRASH',
+      consecutiveFails: 3,
+      lastError: { 
+        message: 'Mock Error: Connection refused', 
+        type: 'CRASH', 
+        ts: Date.now() 
+      },
+      reportedAt: new Date().toISOString(),
+    };
+
+    log.info('Phoenix Mesh: Triggering manual test incident');
+    res.status(202).json({ status: 'test_triggered', report: mockReport });
+
+    handleFailure(mockReport).catch(err => {
+      log.error({ err: err.message }, 'Phoenix Mesh: Test incident handler failed');
+    });
+  });
+}
+
+//lifecycle management
+
+export { app };
+
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
+
+if (isMain) {
+const server = app.listen(PORT, () => {
+  log.info({ port: PORT, k8sReady }, 'Phoenix Mesh Controller operational');
+});
+
+function gracefulShutdown(signal) {
+  log.info({ signal }, 'Phoenix Mesh Controller: Initiating graceful shutdown');
+  
+  server.close(() => {
+    log.info('Phoenix Mesh Controller: All network connections closed');
+    process.exit(0);
+  });
+
+
+  setTimeout(() => {
+    log.fatal('Phoenix Mesh Controller: Shutdown timed out, forcing exit');
+    process.exit(1);
+  }, 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+process.on('unhandledRejection', (reason) => {
+  log.fatal({ reason }, 'Phoenix Mesh Controller: Unhandled promise rejection detected');
+});
+}
