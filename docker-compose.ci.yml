@@ -1,5 +1,8 @@
 services:
-  #avoid pulling/running Ollama in CI 
+  # Disable Ollama in CI - not needed when RCA_PROVIDER=rules
+  ollama:
+    profiles: ["manual"]
+
   phoenix-controller:
     environment:
       RCA_PROVIDER: rules
