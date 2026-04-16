@@ -4,6 +4,7 @@ import express from 'express';
 import axios from 'axios';
 import pino from 'pino';
 import { register, Gauge, Counter, Histogram } from 'prom-client';
+import { fileURLToPath } from 'url';
 
 const log = pino({ level: process.env.LOG_LEVEL || 'info' });
 const app = express();
@@ -198,6 +199,9 @@ app.all('/proxy/*', async (req, res) => {
   }
 });
 
+export { app, state, CONFIG, classifyError, recordProbe, probeHealth };
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
 const server = app.listen(CONFIG.port, () => {
   log.info({ port: CONFIG.port }, 'Sidecar agent initialized');
 });
@@ -211,3 +215,4 @@ function gracefulShutdown() {
 
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
+}
