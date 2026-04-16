@@ -1,69 +1,113 @@
 'use strict';
 
-import axios from 'axios';
-import pino from 'pino';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const log = pino({ 
-  level: process.env.LOG_LEVEL || 'info',
-  name: 'metrics-collector'
+vi.mock('axios');
+
+import axios from 'axios';
+import { collectServiceMetrics } from '../prometheus.js';
+
+const mockVectorResponse = (value) => ({
+  data: {
+    data: {
+      resultType: 'vector',
+      result: [{ value: ['timestamp', String(value)] }],
+    },
+  },
 });
 
-const PROMETHEUS_URL = process.env.PROMETHEUS_URL || 'http://localhost:9090';
+const mockScalarResponse = (value) => ({
+  data: {
+    data: {
+      resultType: 'scalar',
+      result: ['timestamp', String(value)],
+    },
+  },
+});
 
-export async function collectServiceMetrics(service) {
-  try {
-    const errorRateQuery = `rate(service_errors_total{service="${service}"}[5m])`;
-    const errorRateResponse = await queryPrometheus(errorRateQuery);
-    const errorRate = parseMetricValue(errorRateResponse) || 0;
-    const latencyQuery = `histogram_quantile(0.95, rate(service_probe_latency_ms_bucket{service="${service}"}[5m]))`;
-    const latencyResponse = await queryPrometheus(latencyQuery);
-    const latency = parseMetricValue(latencyResponse) || 0;
-    const cpuQuery = `rate(container_cpu_usage_seconds_total{pod_name=~"${service}.*"}[5m]) * 100`;
-    const cpuResponse = await queryPrometheus(cpuQuery);
-    const cpu = parseMetricValue(cpuResponse) || 0;
-    const memoryQuery = `container_memory_usage_bytes{pod_name=~"${service}.*"} / container_spec_memory_limit_bytes{pod_name=~"${service}.*"} * 100`;
-    const memoryResponse = await queryPrometheus(memoryQuery);
-    const memory = parseMetricValue(memoryResponse) || 0;
+describe('collectServiceMetrics', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
-    const metrics = {
-      service,
-      errorRate: Math.min(errorRate, 1), // Clamp between 0-1
-      latency: Math.round(latency),
-      cpu: Math.round(cpu),
-      memory: Math.round(memory),
-      timestamp: new Date().toISOString(),
-    };
+  it('returns metrics with correct values on success', async () => {
+    axios.get
+      .mockResolvedValueOnce(mockVectorResponse(0.02))   // errorRate
+      .mockResolvedValueOnce(mockVectorResponse(250))    // latency
+      .mockResolvedValueOnce(mockVectorResponse(65))     // cpu
+      .mockResolvedValueOnce(mockVectorResponse(70));    // memory
 
-    log.info({ service, ...metrics }, 'Metrics collected');
-    return metrics;
-  } catch (err) {
-    log.error({ err: err.message, service }, 'Failed to collect metrics');
-    return null;
-  }
-}
+    const metrics = await collectServiceMetrics('my-service');
 
-async function queryPrometheus(query) {
-  try {
-    const response = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
-      params: { query },
-      timeout: 5000,
+    expect(metrics).toMatchObject({
+      service: 'my-service',
+      errorRate: expect.any(Number),
+      latency: expect.any(Number),
+      cpu: expect.any(Number),
+      memory: expect.any(Number),
+      timestamp: expect.any(String),
     });
+    expect(metrics.latency).toBe(250);
+    expect(metrics.cpu).toBe(65);
+    expect(metrics.memory).toBe(70);
+  });
 
-    return response.data.data;
-  } catch (err) {
-    log.warn({ err: err.message, query }, 'Prometheus query failed');
-    return null;
-  }
-}
-function parseMetricValue(data) {
-  if (!data) return null;
+  it('clamps errorRate to a maximum of 1', async () => {
+    axios.get
+      .mockResolvedValueOnce(mockVectorResponse(5.0))  // errorRate > 1
+      .mockResolvedValueOnce(mockVectorResponse(100))
+      .mockResolvedValueOnce(mockVectorResponse(50))
+      .mockResolvedValueOnce(mockVectorResponse(60));
 
-  if (data.resultType === 'vector' && data.result?.length > 0) {
-    const value = data.result[0].value?.[1];
-    return value ? parseFloat(value) : null;
-  }
-  if (data.resultType === 'scalar' && data.result?.length === 2) {
-    return parseFloat(data.result[1]);
-  }
-  return null;
-}
+    const metrics = await collectServiceMetrics('my-service');
+    expect(metrics.errorRate).toBe(1);
+  });
+
+  it('defaults to 0 when a query returns empty/null data', async () => {
+    axios.get
+      .mockResolvedValueOnce({ data: { data: { resultType: 'vector', result: [] } } })
+      .mockResolvedValueOnce({ data: { data: null } })
+      .mockResolvedValueOnce(mockVectorResponse(10))
+      .mockResolvedValueOnce(mockVectorResponse(20));
+
+    const metrics = await collectServiceMetrics('my-service');
+    expect(metrics.errorRate).toBe(0);
+    expect(metrics.latency).toBe(0);
+  });
+
+  it('handles scalar result type correctly', async () => {
+    axios.get
+      .mockResolvedValueOnce(mockScalarResponse(0.05))
+      .mockResolvedValueOnce(mockScalarResponse(300))
+      .mockResolvedValueOnce(mockScalarResponse(40))
+      .mockResolvedValueOnce(mockScalarResponse(55));
+
+    const metrics = await collectServiceMetrics('scalar-service');
+    expect(metrics.latency).toBe(300);
+  });
+
+  it('returns metrics with all-zero values when all Prometheus queries fail', async () => {
+    axios.get.mockRejectedValue(new Error('Prometheus unreachable'));
+
+    const metrics = await collectServiceMetrics('failing-service');
+    // queryPrometheus catches errors internally; outer function returns metrics with 0 defaults
+    expect(metrics).not.toBeNull();
+    expect(metrics.errorRate).toBe(0);
+    expect(metrics.latency).toBe(0);
+    expect(metrics.cpu).toBe(0);
+    expect(metrics.memory).toBe(0);
+  });
+
+  it('returns metrics with zeros when individual queries fail with network errors', async () => {
+    axios.get
+      .mockRejectedValueOnce(new Error('query failed'))   // errorRate fails
+      .mockResolvedValueOnce(mockVectorResponse(200))     // latency succeeds
+      .mockRejectedValueOnce(new Error('query failed'))   // cpu fails
+      .mockResolvedValueOnce(mockVectorResponse(80));     // memory succeeds
+
+    const metrics = await collectServiceMetrics('partial-service');
+    expect(metrics).not.toBeNull();
+    expect(metrics.latency).toBe(200);
+    expect(metrics.memory).toBe(80);
+  });
+});
